@@ -3,6 +3,9 @@ import json
 import datetime
 import os
 import math
+import time
+import signal
+import sys
 
 # ================= 加载环境变量 =================
 def load_env():
@@ -27,6 +30,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PORTFOLIO_FILE = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
 STATS_FILE = os.path.join(SCRIPT_DIR, "trade_stats.json")
+LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "apex_daemon.log")
+
+# 守护进程参数
+POLL_INTERVAL = 5  # 轮询间隔（秒）
+TRADING_START = 9   # 交易开始时间
+TRADING_END = 15    # 交易结束时间
 
 # 默认股票池
 DEFAULT_SYMBOLS = {
@@ -55,6 +64,44 @@ COMMISSION = 0.00025
 
 # ================= 凯利公式参数 =================
 KELLY_FRACTION = 0.5        # 凯利系数折扣（使用半凯利，更保守）
+
+# ================= 全局状态 =================
+running = True  # 控制循环运行
+
+def signal_handler(signum, frame):
+    """优雅退出信号处理"""
+    global running
+    print("\n🛑 收到停止信号，正在优雅退出...")
+    running = False
+
+def log(message):
+    """日志输出（同时打印和写入文件）"""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] {message}"
+    print(log_line)
+    
+    # 写入日志文件
+    try:
+        log_dir = os.path.dirname(LOG_FILE)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_line + "\n")
+    except:
+        pass
+
+def is_trading_time():
+    """检查是否在交易时段"""
+    now = datetime.datetime.now()
+    hour = now.hour
+    
+    # 周末不交易
+    if now.weekday() >= 5:  # 5=周六, 6=周日
+        return False
+    
+    # 交易时段: 9:00 - 15:00
+    return TRADING_START <= hour < TRADING_END
+
 # ===============================================
 
 def calculate_statistics(prices):
@@ -63,20 +110,10 @@ def calculate_statistics(prices):
     
     Z-Score 衡量当前收益率偏离历史均值的程度：
     Z = (r_t - μ) / σ
-    
-    其中：
-    - r_t = 最新收益率
-    - μ = 收益率序列均值
-    - σ = 收益率序列标准差
-    
-    LaTeX: Z = \frac{r_t - \mu}{\sigma}
-    
-    当 Z > 2.0 时，表示突破 95% 置信区间
     """
     if len(prices) < 2:
         return None, None, None
     
-    # 计算收益率序列 r_t
     returns = []
     for i in range(1, len(prices)):
         r = (prices[i] - prices[i-1]) / prices[i-1]
@@ -85,33 +122,25 @@ def calculate_statistics(prices):
     if len(returns) < 2:
         return None, None, None
     
-    # 计算均值 μ
     n = len(returns)
     mu = sum(returns) / n
-    
-    # 计算标准差 σ (使用样本标准差，n-1)
     variance = sum((r - mu) ** 2 for r in returns) / (n - 1)
     sigma = math.sqrt(variance) if variance > 0 else 0.0001
     
-    # 计算最新收益率的 Z-Score
     r_t = returns[-1]
     z_score = (r_t - mu) / sigma if sigma > 0 else 0
     
     return mu, sigma, z_score
 
 def calculate_bollinger_bands(prices, k=2.0):
-    """计算布林带：中轨、上轨、下轨"""
+    """计算布林带"""
     if len(prices) < 5:
         return None, None, None
     
-    # 中轨 = 移动平均
     mid = sum(prices) / len(prices)
-    
-    # 标准差
     variance = sum((p - mid) ** 2 for p in prices) / len(prices)
     std = math.sqrt(variance)
     
-    # 上下轨
     upper = mid + k * std
     lower = mid - k * std
     
@@ -120,35 +149,23 @@ def calculate_bollinger_bands(prices, k=2.0):
 def calculate_kelly_fraction(win_rate, win_loss_ratio):
     """
     凯利公式（精确版）：
-    f* = (bp - q) / b = (bp - (1-p)) / b
-    
-    其中：
-    - b = 赔率（盈亏比）= 平均盈利 / 平均亏损
-    - p = 胜率
-    - q = 1 - p = 败率
-    
-    LaTeX: f^* = \frac{bp - (1-p)}{b}
+    f* = (bp - (1-p)) / b
     """
     if win_rate <= 0 or win_loss_ratio <= 0:
-        return 0.1  # 默认保守值
+        return 0.1
     
-    p = win_rate  # 胜率
-    b = win_loss_ratio  # 赔率（盈亏比）
-    q = 1 - p  # 败率
+    p = win_rate
+    b = win_loss_ratio
+    q = 1 - p
     
-    # 凯利公式精确计算
-    # f* = (bp - q) / b = (bp - (1-p)) / b
     numerator = b * p - q
     kelly = numerator / b
     
-    # 凯利公式可能给出负值或大于1的值，需要限制
     kelly = max(0, min(kelly, 0.5))
-    
-    # 使用半凯利（更保守）
     return kelly * KELLY_FRACTION
 
 def load_trade_stats():
-    """加载历史交易统计（用于凯利公式）"""
+    """加载历史交易统计"""
     if os.path.exists(STATS_FILE):
         try:
             with open(STATS_FILE, "r", encoding="utf-8") as f:
@@ -161,7 +178,7 @@ def load_trade_stats():
         "win_trades": 0,
         "total_profit": 0,
         "total_loss": 0,
-        "symbols": {}  # 每只股票的独立统计
+        "symbols": {}
     }
 
 def save_trade_stats(stats):
@@ -200,12 +217,10 @@ def get_symbol_kelly_ratio(stats, symbol):
     sym = stats["symbols"][symbol]
     trades = sym["trades"]
     
-    if trades < 3:  # 样本太少，用默认值
+    if trades < 3:
         return TRADE_RATIO
     
     win_rate = sym["wins"] / trades
-    
-    # 计算平均盈亏比
     avg_win = sym["total_profit"] / sym["wins"] if sym["wins"] > 0 else 0
     avg_loss = sym["total_loss"] / (trades - sym["wins"]) if (trades - sym["wins"]) > 0 else 1
     
@@ -213,39 +228,22 @@ def get_symbol_kelly_ratio(stats, symbol):
         avg_loss = 1
     
     win_loss_ratio = avg_win / avg_loss
+    kelly = calculate_kelly_fraction(win_rate, win_loss_ratio)
     
-    kelly = calculate_kelly_ratio(win_rate, win_loss_ratio)
-    
-    # 如果凯利值为0或负，使用最小保守值
     return max(kelly, 0.05)
 
 def calculate_var(portfolio_value, returns_history, confidence=0.99):
     """
-    计算在险价值 VaR (Value at Risk) - 精确版
-    
-    定义：在特定置信区间 α 下，未来一个交易日的最大可能损失
-    
-    LaTeX: \text{VaR}_{\alpha} = \inf \{ L \in \mathbb{R} : P(\text{Loss} > L) \le 1 - \alpha \}
-    
-    使用历史模拟法：
-    - 对历史收益率排序
-    - 取 (1-α) 分位数对应的损失
+    计算在险价值 VaR
     """
     if len(returns_history) < 10:
         return 0, 0
     
-    # 对收益率排序
     sorted_returns = sorted(returns_history)
-    
-    # 计算 (1 - confidence) 分位数索引
-    # 例如 99% 置信度下，取第 1% 分位数
     var_index = int(len(sorted_returns) * (1 - confidence))
     var_index = max(0, min(var_index, len(sorted_returns) - 1))
     
-    # VaR 对应的收益率
     var_return = sorted_returns[var_index]
-    
-    # VaR = 组合价值 × 最大损失率
     var = portfolio_value * abs(var_return) if var_return < 0 else 0
     var_pct = (var / portfolio_value) * 100 if portfolio_value > 0 else 0
     
@@ -269,13 +267,12 @@ def load_ai_config():
                     
                     if "symbols" in config and config["symbols"]:
                         SYMBOLS = config["symbols"]
-                        print(f"🎯 AI选股: 今日监控 {len(SYMBOLS)} 只标的")
                     
-                    print(f"🧠 已加载AI参数: Z阈值={Z_SCORE_THRESHOLD}|追涨{SURGE_THRESHOLD*100}%|止损{STOP_LOSS_PCT*100}%|开火{TRADE_RATIO*100}%")
-                    return
-        print("⚠️ 未找到今日AI配置，使用默认参数")
+                    return True
+        return False
     except Exception as e:
-        print(f"⚠️ AI配置读取失败: {e}")
+        log(f"⚠️ AI配置读取失败: {e}")
+        return False
 
 def load_portfolio():
     today_str = str(datetime.date.today())
@@ -284,7 +281,7 @@ def load_portfolio():
             with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
                 p = json.load(f)
                 if p.get("date") != today_str:
-                    print("🌅 新的一天！系统正在为你解锁昨天买入的冻结筹码...")
+                    log("🌅 新的一天！解锁昨日冻结筹码...")
                     for sym, pos in p["positions"].items():
                         pos["available_shares"] = pos["total_shares"]
                     p["date"] = today_str
@@ -323,17 +320,44 @@ def get_market_data(symbols):
         return market_data
     except Exception: return {}
 
-def main():
-    print(f"[{datetime.datetime.now()}] ⚡ APEX 统计学量化引擎 v3.0 启动...")
+def send_alert(alerts, total_assets, total_market_value, cash, win_rate, total_trades, win_trades):
+    """发送飞书警报"""
+    return_pct = (total_assets - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+
+    report = f"**🔥 APEX 统计学引擎 v4.0 (实时守护模式)**\n\n"
+    for alert in alerts:
+        report += f"{alert}\n\n"
     
-    # 加载配置
-    load_ai_config()
-    trade_stats = load_trade_stats()
-    
+    report += f"---\n**💼 账户总览 (初始100万)**\n"
+    report += f"动态总资产: **{total_assets:.2f} 元** (收益: {return_pct:.2f}%)\n"
+    report += f"持仓总市值: {total_market_value:.2f} 元\n"
+    report += f"可用现金流: {cash:.2f} 元\n"
+    report += f"历史胜率: {win_rate:.1f}% ({win_trades}/{total_trades})\n"
+
+    payload = {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "⚡ APEX 实时引擎警报"},
+                "template": "purple"
+            },
+            "elements": [{"tag": "markdown", "content": report}]
+        }
+    }
+    try:
+        requests.post(FEISHU_WEBHOOK, json=payload)
+    except Exception as e:
+        log(f"飞书推送失败: {e}")
+
+def scan_market():
+    """单次市场扫描"""
     p = load_portfolio()
     data = get_market_data(list(SYMBOLS.keys()))
-    if not data: return
-
+    if not data:
+        return
+    
+    trade_stats = load_trade_stats()
     alerts = []
     
     # 计算组合总净值
@@ -348,13 +372,11 @@ def main():
             r = (prices[i] - prices[i-1]) / prices[i-1]
             all_returns.append(r)
     
-    # 计算 VaR（精确版）
+    # VaR 预警
     if len(all_returns) >= 10:
         var, var_pct = calculate_var(total_assets, all_returns)
-        
-        # VaR 警报
-        if var_pct > 3:  # VaR 超过 3%
-            alerts.append(f"⚠️ **VaR 风险警报**: 今日潜在最大损失 `{var:.2f}元` ({var_pct:.2f}%)\n建议降低仓位或增加对冲。")
+        if var_pct > 3:
+            alerts.append(f"⚠️ **VaR 风险警报**: 今日潜在最大损失 `{var:.2f}元` ({var_pct:.2f}%)")
     
     for sym, info in data.items():
         price = info["current"]
@@ -369,9 +391,7 @@ def main():
         if len(p["price_queue"][sym]) > MOMENTUM_WINDOW:
             p["price_queue"][sym].pop(0)
 
-        # ==========================================
-        # 模块 2：卖出逻辑 (含凯利更新)
-        # ==========================================
+        # 卖出逻辑
         if sym in p["positions"]:
             pos = p["positions"][sym]
             
@@ -383,11 +403,8 @@ def main():
             
             sell_reason = None
             
-            # 追踪止盈
             if profit_pct >= PROFIT_ACTIVATE and drop_from_peak >= TRAILING_DROP:
                 sell_reason = f"🏆 追踪止盈触发 (触顶回落{drop_from_peak*100:.1f}%)"
-            
-            # 铁血止损
             elif profit_pct <= STOP_LOSS_PCT:
                 sell_reason = f"🩸 铁血止损触发 (亏损{profit_pct*100:.1f}%)"
 
@@ -403,56 +420,43 @@ def main():
                 actual_revenue = sell_amount - total_cost
                 profit_val = actual_revenue - (sell_shares * pos["cost"])
                 
-                # 更新交易统计（凯利公式用）
                 update_trade_stats(trade_stats, sym, profit_val)
                 
                 p["cash"] += actual_revenue
                 pos["total_shares"] -= sell_shares
                 pos["available_shares"] = 0
                 
-                alerts.append(f"🔴 **{sell_reason}**\n卖出标的：{name}\n成交均价：`{actual_sell_price:.3f}` | 数量：`{sell_shares}股`\n本笔盈亏：`{profit_val:.2f}元`")
+                alerts.append(f"🔴 **{sell_reason}**\n卖出：{name} @ `{actual_sell_price:.3f}` | `{sell_shares}股`\n盈亏：`{profit_val:.2f}元`")
                 
                 if pos["total_shares"] == 0:
                     del p["positions"][sym]
                 continue
 
-        # ==========================================
-        # 模块 3：统计学买入信号
-        # ==========================================
+        # 买入逻辑
         queue = p["price_queue"][sym]
         
         if len(queue) >= 5:
-            # ===== 方法1: Z-Score 信号 =====
             mean, std, z_score = calculate_statistics(queue)
-            
-            # ===== 方法2: 布林带信号 =====
             mid, upper, lower = calculate_bollinger_bands(queue)
             
-            # 综合信号判断
             buy_signal = False
             signal_reason = ""
             
-            # Z-Score 突破（突破均值+N倍标准差）
             if z_score is not None and z_score >= Z_SCORE_THRESHOLD:
                 buy_signal = True
-                signal_reason = f"Z-Score={z_score:.2f}(>{Z_SCORE_THRESHOLD})"
+                signal_reason = f"Z-Score={z_score:.2f}"
             
-            # 价格突破布林带上轨（动量信号）
             if upper is not None and price > upper:
                 buy_signal = True
-                signal_reason = f"突破布林上轨({upper:.2f})"
+                signal_reason = f"突破布林上轨"
             
-            # 备用：固定阈值
             velocity = (price - queue[0]) / queue[0] if queue[0] > 0 else 0
             if velocity >= SURGE_THRESHOLD:
                 buy_signal = True
-                signal_reason = f"涨速={velocity*100:.2f}%(>{SURGE_THRESHOLD*100}%)"
+                signal_reason = f"涨速={velocity*100:.2f}%"
             
             if buy_signal and p["cash"] >= 10000 and sym not in p["positions"]:
-                # 凯利公式计算最优仓位
                 kelly_ratio = get_symbol_kelly_ratio(trade_stats, sym)
-                
-                # 取 AI 下发比例和凯利比例的最小值（更保守）
                 actual_ratio = min(TRADE_RATIO, kelly_ratio)
                 
                 trade_amount = p["cash"] * actual_ratio
@@ -473,44 +477,64 @@ def main():
                         "peak_price": actual_buy_price
                     }
                     
-                    alerts.append(f"🚀 **统计学信号触发** ({signal_reason})\n买入标的：{name}\n成交均价：`{actual_buy_price:.3f}` | 数量：`{shares}股`\n仓位比例：`{actual_ratio*100:.1f}%` (凯利建议{kelly_ratio*100:.1f}%)\n⚠️ [T+1锁定] 明日解锁。")
+                    alerts.append(f"🚀 **统计学信号** ({signal_reason})\n买入：{name} @ `{actual_buy_price:.3f}` | `{shares}股`\n仓位：`{actual_ratio*100:.1f}%`")
 
-    # === 生成战报 ===
+    # 发送警报
     if alerts:
-        total_market_value = sum(pos["total_shares"] * data[s]["current"] for s, pos in p["positions"].items() if s in data)
-        total_assets = p["cash"] + total_market_value
-        return_pct = (total_assets - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
-
-        # 计算胜率
         win_rate = (trade_stats["win_trades"] / trade_stats["total_trades"] * 100) if trade_stats["total_trades"] > 0 else 0
-
-        report = f"**🔥 APEX 统计学量化战报 v3.0**\n\n"
-        for alert in alerts:
-            report += f"{alert}\n\n"
-        
-        report += f"---\n**💼 账户总览 (初始100万)**\n"
-        report += f"动态总资产: **{total_assets:.2f} 元** (收益: {return_pct:.2f}%)\n"
-        report += f"持仓总市值: {total_market_value:.2f} 元\n"
-        report += f"可用现金流: {p['cash']:.2f} 元\n"
-        report += f"历史胜率: {win_rate:.1f}% ({trade_stats['win_trades']}/{trade_stats['total_trades']})\n"
-
-        payload = {
-            "msg_type": "interactive",
-            "card": {
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {"tag": "plain_text", "content": "⚡ APEX 统计学引擎 v3.0"},
-                    "template": "purple"
-                },
-                "elements": [{"tag": "markdown", "content": report}]
-            }
-        }
-        try:
-            requests.post(FEISHU_WEBHOOK, json=payload)
-        except Exception as e: print("飞书推送异常")
+        send_alert(alerts, total_assets, total_market_value, p["cash"], win_rate, trade_stats["total_trades"], trade_stats["win_trades"])
 
     save_portfolio(p)
-    print("✅ 扫描结束，账本已同步。")
+
+def main():
+    """守护进程主循环"""
+    global running
+    
+    # 注册信号处理
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    log("="*50)
+    log("🚀 APEX 统计学量化引擎 v4.0 (实时守护模式)")
+    log(f"📊 轮询间隔: {POLL_INTERVAL}秒")
+    log(f"⏰ 交易时段: {TRADING_START}:00 - {TRADING_END}:00")
+    log("="*50)
+    
+    # 加载配置
+    if load_ai_config():
+        log(f"🧠 已加载AI参数 | 监控 {len(SYMBOLS)} 只标的")
+    else:
+        log("⚠️ 使用默认参数")
+    
+    last_config_check = datetime.datetime.now()
+    config_check_interval = 300  # 5分钟检查一次配置更新
+    
+    while running:
+        try:
+            now = datetime.datetime.now()
+            
+            # 定期检查配置更新
+            if (now - last_config_check).total_seconds() > config_check_interval:
+                if load_ai_config():
+                    log("🔄 配置已更新")
+                last_config_check = now
+            
+            # 检查交易时段
+            if is_trading_time():
+                scan_market()
+            else:
+                # 非交易时段，降低检查频率
+                time.sleep(60)
+                continue
+            
+            # 等待下一次扫描
+            time.sleep(POLL_INTERVAL)
+            
+        except Exception as e:
+            log(f"❌ 异常: {e}")
+            time.sleep(10)  # 异常后等待10秒
+    
+    log("👋 守护进程已停止")
 
 if __name__ == "__main__":
     main()
