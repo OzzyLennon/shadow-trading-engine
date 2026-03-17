@@ -1,0 +1,30 @@
+# 环境变量（包含敏感信息，不上传）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# 日志
+logs/
+*.log
+
+# 账本数据（模拟交易记录）
+*.json
+!*.example.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
