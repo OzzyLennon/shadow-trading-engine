@@ -32,6 +32,8 @@ CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
 STATS_FILE = os.path.join(SCRIPT_DIR, "trade_stats.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "apex_daemon.log")
 
+SLIPPAGE_LOG = os.path.join(SCRIPT_DIR, "logs", "slippage_monitor.json")
+
 # ================= 守护进程参数 =================
 POLL_INTERVAL = 5  # 轮询间隔（秒）
 
@@ -228,6 +230,103 @@ def is_valid_price(symbol, price, name):
     prev_prices[symbol] = price
     
     return True
+
+# ===============================================
+# 真实盘口获取（滑点监控）
+# ===============================================
+
+def get_real_tick_price(symbol):
+    """
+    获取东方财富真实盘口价格
+    用于滑点对比
+    """
+    # 转换代码格式
+    if symbol.startswith('sh'):
+        secid = f"1.{symbol[2:]}"
+    elif symbol.startswith('sz'):
+        secid = f"0.{symbol[2:]}"
+    else:
+        return None
+    
+    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f43,f44,f45,f46,f47,f48,f49,f50"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=3)
+        data = res.json()
+        if data.get('data'):
+            d = data['data']
+            return {
+                "current": d.get('f43', 0) / 100 if d.get('f43') else 0,
+                "sell1": d.get('f45', 0) / 100 if d.get('f45') else 0,  # 卖一价
+                "buy1": d.get('f46', 0) / 100 if d.get('f46') else 0,    # 买一价
+            }
+    except:
+        pass
+    return None
+
+def record_slippage(symbol, name, sina_price, action="买入"):
+    """
+    记录滑点数据
+    对比新浪价格 vs 东财真实盘口
+    """
+    real_tick = get_real_tick_price(symbol)
+    
+    if not real_tick or real_tick.get('sell1', 0) <= 0:
+        log(f"⚠️ 滑点记录失败: 无法获取真实盘口 {symbol}")
+        return None
+    
+    # 东财卖一价（买入时实际需要付出的价格）
+    em_price = real_tick['sell1']
+    
+    # 计算滑点差距
+    gap = abs(sina_price - em_price)
+    gap_pct = (gap / em_price) * 100 if em_price > 0 else 0
+    
+    # 理论滑点
+    theoretical = SLIPPAGE * 100
+    
+    # 记录数据
+    slippage_record = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "symbol": symbol,
+        "name": name,
+        "action": action,
+        "sina_price": sina_price,
+        "eastmoney_price": em_price,
+        "gap": gap,
+        "gap_pct": gap_pct,
+        "theoretical_slippage": theoretical,
+        "actual_vs_theoretical": gap_pct - theoretical
+    }
+    
+    # 保存到日志文件
+    try:
+        import json
+        log_dir = os.path.dirname(SLIPPAGE_LOG)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        records = []
+        if os.path.exists(SLIPPAGE_LOG):
+            with open(SLIPPAGE_LOG, 'r') as f:
+                records = json.load(f)
+        
+        records.append(slippage_record)
+        
+        with open(SLIPPAGE_LOG, 'w') as f:
+            json.dump(records, f, indent=2)
+        
+        # 日志输出
+        if gap_pct > theoretical:
+            log(f"⚠️ 滑点监控: {name} {action} | 新浪{sina_price:.3f} vs 东财{em_price:.3f} | 差距{gap_pct:.3f}% (理论{theoretical:.2f}%)")
+        else:
+            log(f"✅ 滑点监控: {name} {action} | 差距{gap_pct:.3f}% (在理论范围内)")
+            
+    except Exception as e:
+        log(f"⚠️ 滑点记录异常: {e}")
+    
+    return slippage_record
 
 # ===============================================
 # 统计学核心
@@ -615,7 +714,14 @@ def scan_market():
                     # 更新冷却期
                     update_trade_time(sym)
                     
-                    alerts.append(f"🚀 **信号触发** ({signal_reason})\n买入：{name} @ `{actual_buy_price:.3f}` | `{shares}股`\n冷却期：{COOLDOWN_MINUTES}分钟")
+                    # 记录滑点（对比新浪价格 vs 东财真实盘口）
+                    slippage_rec = record_slippage(sym, name, smoothed_price, "买入")
+                    slippage_info = ""
+                    if slippage_rec:
+                        gap = slippage_rec.get('gap_pct', 0)
+                        slippage_info = f"\n📊 滑点: {gap:.3f}%"
+                    
+                    alerts.append(f"🚀 **信号触发** ({signal_reason})\n买入：{name} @ `{actual_buy_price:.3f}` | `{shares}股`\n冷却期：{COOLDOWN_MINUTES}分钟{slippage_info}")
 
     if alerts:
         win_rate = (trade_stats["win_trades"] / trade_stats["total_trades"] * 100) if trade_stats["total_trades"] > 0 else 0
