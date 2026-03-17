@@ -2,6 +2,7 @@ import requests
 import json
 import datetime
 import os
+import math
 
 # ================= 加载环境变量 =================
 def load_env():
@@ -25,8 +26,9 @@ INITIAL_CAPITAL = 1000000.0  # 模拟盘 100 万起始资金
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PORTFOLIO_FILE = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
+STATS_FILE = os.path.join(SCRIPT_DIR, "trade_stats.json")
 
-# 默认股票池（会被AI大脑动态覆盖）
+# 默认股票池
 DEFAULT_SYMBOLS = {
     "sh601138": "工业富联", "sz000938": "紫光股份", "sz002371": "北方华创", "sh603019": "中科曙光",
     "sh601127": "赛力斯", "sz002594": "比亚迪", "sz002456": "欧菲光", "sz002241": "歌尔股份",
@@ -35,48 +37,206 @@ DEFAULT_SYMBOLS = {
     "sz159819": "人工智能ETF", "sh512880": "证券ETF", "sh513180": "恒生科技ETF", "sh512010": "医药ETF"
 }
 
-# 当前使用的股票池
 SYMBOLS = DEFAULT_SYMBOLS.copy()
 
-# ================= 顶级机构策略参数（默认值，会被AI大脑覆盖）==================
-MOMENTUM_WINDOW = 5
-SURGE_THRESHOLD = 0.015
-PROFIT_ACTIVATE = 0.05
-TRAILING_DROP = 0.03
-STOP_LOSS_PCT = -0.08
-TRADE_RATIO = 0.3
+# ================= 统计学策略参数 =================
+MOMENTUM_WINDOW = 20        # 扩大窗口用于统计计算
+Z_SCORE_THRESHOLD = 2.0     # Z-Score 阈值（95%置信度）
+SURGE_THRESHOLD = 0.015     # 备用固定阈值
+STOP_LOSS_PCT = -0.08       # 止损线
+PROFIT_ACTIVATE = 0.05      # 止盈激活
+TRAILING_DROP = 0.03        # 回撤止盈
+TRADE_RATIO = 0.3           # 默认开火比例
 
 # ================= 交易成本参数 =================
-SLIPPAGE = 0.002      # 滑点 0.2%
-STAMP_DUTY = 0.001    # 印花税 0.1%（仅卖出）
-COMMISSION = 0.00025  # 佣金 0.025%
+SLIPPAGE = 0.002
+STAMP_DUTY = 0.001
+COMMISSION = 0.00025
+
+# ================= 凯利公式参数 =================
+KELLY_FRACTION = 0.5        # 凯利系数折扣（使用半凯利，更保守）
 # ===============================================
 
+def calculate_statistics(prices):
+    """计算收益率序列的统计量：均值、标准差、Z-Score"""
+    if len(prices) < 2:
+        return None, None, None
+    
+    # 计算收益率序列
+    returns = []
+    for i in range(1, len(prices)):
+        r = (prices[i] - prices[i-1]) / prices[i-1]
+        returns.append(r)
+    
+    if len(returns) < 2:
+        return None, None, None
+    
+    # 计算均值和标准差
+    n = len(returns)
+    mean = sum(returns) / n
+    
+    variance = sum((r - mean) ** 2 for r in returns) / (n - 1)
+    std = math.sqrt(variance) if variance > 0 else 0.0001
+    
+    # 计算最新收益率的 Z-Score
+    latest_return = returns[-1]
+    z_score = (latest_return - mean) / std if std > 0 else 0
+    
+    return mean, std, z_score
+
+def calculate_bollinger_bands(prices, k=2.0):
+    """计算布林带：中轨、上轨、下轨"""
+    if len(prices) < 5:
+        return None, None, None
+    
+    # 中轨 = 移动平均
+    mid = sum(prices) / len(prices)
+    
+    # 标准差
+    variance = sum((p - mid) ** 2 for p in prices) / len(prices)
+    std = math.sqrt(variance)
+    
+    # 上下轨
+    upper = mid + k * std
+    lower = mid - k * std
+    
+    return mid, upper, lower
+
+def calculate_kelly_ratio(win_rate, win_loss_ratio):
+    """凯利公式：f* = (bp - q) / b
+    - b = 赔率（盈亏比）
+    - p = 胜率
+    - q = 1 - p
+    """
+    if win_rate <= 0 or win_loss_ratio <= 0:
+        return 0.1  # 默认保守值
+    
+    q = 1 - win_rate
+    kelly = (win_loss_ratio * win_rate - q) / win_loss_ratio
+    
+    # 凯利公式可能给出负值或大于1的值，需要限制
+    kelly = max(0, min(kelly, 0.5))
+    
+    # 使用半凯利（更保守）
+    return kelly * KELLY_FRACTION
+
+def load_trade_stats():
+    """加载历史交易统计（用于凯利公式）"""
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    
+    return {
+        "total_trades": 0,
+        "win_trades": 0,
+        "total_profit": 0,
+        "total_loss": 0,
+        "symbols": {}  # 每只股票的独立统计
+    }
+
+def save_trade_stats(stats):
+    """保存交易统计"""
+    with open(STATS_FILE, "w", encoding="utf-8") as f:
+        json.dump(stats, f, indent=4, ensure_ascii=False)
+
+def update_trade_stats(stats, symbol, profit):
+    """更新交易统计"""
+    stats["total_trades"] += 1
+    
+    if symbol not in stats["symbols"]:
+        stats["symbols"][symbol] = {
+            "trades": 0, "wins": 0, "total_profit": 0, "total_loss": 0
+        }
+    
+    sym_stats = stats["symbols"][symbol]
+    sym_stats["trades"] += 1
+    
+    if profit > 0:
+        stats["win_trades"] += 1
+        stats["total_profit"] += profit
+        sym_stats["wins"] += 1
+        sym_stats["total_profit"] += profit
+    else:
+        stats["total_loss"] += abs(profit)
+        sym_stats["total_loss"] += abs(profit)
+    
+    save_trade_stats(stats)
+
+def get_symbol_kelly_ratio(stats, symbol):
+    """根据历史数据计算某只股票的凯利比例"""
+    if symbol not in stats["symbols"]:
+        return TRADE_RATIO
+    
+    sym = stats["symbols"][symbol]
+    trades = sym["trades"]
+    
+    if trades < 3:  # 样本太少，用默认值
+        return TRADE_RATIO
+    
+    win_rate = sym["wins"] / trades
+    
+    # 计算平均盈亏比
+    avg_win = sym["total_profit"] / sym["wins"] if sym["wins"] > 0 else 0
+    avg_loss = sym["total_loss"] / (trades - sym["wins"]) if (trades - sym["wins"]) > 0 else 1
+    
+    if avg_loss == 0:
+        avg_loss = 1
+    
+    win_loss_ratio = avg_win / avg_loss
+    
+    kelly = calculate_kelly_ratio(win_rate, win_loss_ratio)
+    
+    # 如果凯利值为0或负，使用最小保守值
+    return max(kelly, 0.05)
+
+def calculate_var(portfolio_value, prices_history, confidence=0.99):
+    """计算 VaR (Value at Risk)
+    简化版：使用历史模拟法
+    """
+    if len(prices_history) < 10:
+        return 0
+    
+    # 计算历史收益率
+    returns = []
+    for i in range(1, len(prices_history)):
+        r = (prices_history[i] - prices_history[i-1]) / prices_history[i-1]
+        returns.append(r)
+    
+    returns.sort()
+    
+    # 取 (1 - confidence) 分位数
+    var_index = int(len(returns) * (1 - confidence))
+    var_return = returns[var_index]
+    
+    # VaR = 组合价值 × 最坏情况下的损失率
+    var = portfolio_value * abs(var_return)
+    
+    return var
+
 def load_ai_config():
-    """读取AI大脑下发的每日作战参数（增强版）"""
-    global SURGE_THRESHOLD, STOP_LOSS_PCT, TRADE_RATIO, SYMBOLS, SLIPPAGE, STAMP_DUTY, COMMISSION
+    """读取AI大脑下发的每日作战参数"""
+    global SURGE_THRESHOLD, STOP_LOSS_PCT, TRADE_RATIO, SYMBOLS, SLIPPAGE, STAMP_DUTY, COMMISSION, Z_SCORE_THRESHOLD
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
-                # 只有当天的配置才生效
                 if config.get("date") == str(datetime.date.today()):
-                    # 加载策略参数
                     SURGE_THRESHOLD = config.get("surge_threshold", SURGE_THRESHOLD)
                     STOP_LOSS_PCT = config.get("stop_loss_pct", STOP_LOSS_PCT)
                     TRADE_RATIO = config.get("trade_ratio", TRADE_RATIO)
-                    
-                    # 加载交易成本
                     SLIPPAGE = config.get("slippage", SLIPPAGE)
                     STAMP_DUTY = config.get("stamp_duty", STAMP_DUTY)
                     COMMISSION = config.get("commission", COMMISSION)
+                    Z_SCORE_THRESHOLD = config.get("z_score_threshold", Z_SCORE_THRESHOLD)
                     
-                    # 加载动态股票池
                     if "symbols" in config and config["symbols"]:
                         SYMBOLS = config["symbols"]
                         print(f"🎯 AI选股: 今日监控 {len(SYMBOLS)} 只标的")
                     
-                    print(f"🧠 已加载AI参数: 追涨{SURGE_THRESHOLD*100}%|止损{STOP_LOSS_PCT*100}%|开火{TRADE_RATIO*100}%|滑点{SLIPPAGE*100}%")
+                    print(f"🧠 已加载AI参数: Z阈值={Z_SCORE_THRESHOLD}|追涨{SURGE_THRESHOLD*100}%|止损{STOP_LOSS_PCT*100}%|开火{TRADE_RATIO*100}%")
                     return
         print("⚠️ 未找到今日AI配置，使用默认参数")
     except Exception as e:
@@ -88,16 +248,11 @@ def load_portfolio():
         try:
             with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
                 p = json.load(f)
-                # ==========================================
-                # 核心机制：A 股 T+1 跨日筹码解锁逻辑
-                # ==========================================
                 if p.get("date") != today_str:
                     print("🌅 新的一天！系统正在为你解锁昨天买入的冻结筹码...")
                     for sym, pos in p["positions"].items():
-                        # 把所有筹码变成"可卖筹码"
                         pos["available_shares"] = pos["total_shares"]
                     p["date"] = today_str
-                    # 清空昨天的价格队列，重新计算日内动量
                     p["price_queue"] = {} 
                 return p
         except Exception: pass
@@ -105,8 +260,8 @@ def load_portfolio():
     return {
         "date": today_str,
         "cash": INITIAL_CAPITAL,
-        "positions": {}, # {"sh601138": {"total_shares": 1000, "available_shares": 0, "cost": 15.0, "peak_price": 15.0}}
-        "price_queue": {}, # {"sh601138": [14.8, 14.9, 15.1]}
+        "positions": {},
+        "price_queue": {},
         "history": [] 
     }
 
@@ -134,10 +289,11 @@ def get_market_data(symbols):
     except Exception: return {}
 
 def main():
-    print(f"[{datetime.datetime.now()}] ⚡ APEX 高频量化引擎扫描中...")
+    print(f"[{datetime.datetime.now()}] ⚡ APEX 统计学量化引擎 v3.0 启动...")
     
-    # 加载AI大脑参数
+    # 加载配置
     load_ai_config()
+    trade_stats = load_trade_stats()
     
     p = load_portfolio()
     data = get_market_data(list(SYMBOLS.keys()))
@@ -145,29 +301,42 @@ def main():
 
     alerts = []
     
+    # 计算组合总净值
+    total_market_value = sum(pos["total_shares"] * data[s]["current"] for s, pos in p["positions"].items() if s in data)
+    total_assets = p["cash"] + total_market_value
+    
+    # 计算 VaR（简化版：用所有价格序列）
+    all_prices = []
+    for sym in p["price_queue"]:
+        all_prices.extend(p["price_queue"][sym])
+    
+    if all_prices:
+        var = calculate_var(total_assets, all_prices)
+        var_pct = (var / total_assets) * 100 if total_assets > 0 else 0
+        
+        # VaR 警报
+        if var_pct > 3:  # VaR 超过 3%
+            alerts.append(f"⚠️ **VaR 风险警报**: 今日潜在最大损失 `{var:.2f}元` ({var_pct:.2f}%)\n建议降低仓位或增加对冲。")
+    
     for sym, info in data.items():
         price = info["current"]
         name = info["name"]
         if price <= 0: continue
 
-        # ==========================================
-        # 模块 1：更新日内价格滑动窗口 (记录最近N次的价格)
-        # ==========================================
+        # 更新价格队列
         if sym not in p["price_queue"]:
             p["price_queue"][sym] = []
         p["price_queue"][sym].append(price)
         
-        # 保持窗口长度不变（比如只留最近5次的快照）
         if len(p["price_queue"][sym]) > MOMENTUM_WINDOW:
             p["price_queue"][sym].pop(0)
 
         # ==========================================
-        # 模块 2：卖出逻辑 (含滑点和交易成本)
+        # 模块 2：卖出逻辑 (含凯利更新)
         # ==========================================
         if sym in p["positions"]:
             pos = p["positions"][sym]
             
-            # 更新该持仓的历史最高价 (为了追踪止盈)
             if price > pos["peak_price"]:
                 pos["peak_price"] = price
 
@@ -176,86 +345,108 @@ def main():
             
             sell_reason = None
             
-            # 策略 A: 追踪止盈 (利润超过5%后，只要从最高点回落3%立刻卖出)
+            # 追踪止盈
             if profit_pct >= PROFIT_ACTIVATE and drop_from_peak >= TRAILING_DROP:
                 sell_reason = f"🏆 追踪止盈触发 (触顶回落{drop_from_peak*100:.1f}%)"
             
-            # 策略 B: 铁血止损 (亏损达到止损线立刻清仓)
+            # 铁血止损
             elif profit_pct <= STOP_LOSS_PCT:
                 sell_reason = f"🩸 铁血止损触发 (亏损{profit_pct*100:.1f}%)"
 
-            # 执行卖出
             if sell_reason and pos["available_shares"] > 0:
                 sell_shares = pos["available_shares"]
                 
-                # ===== 计算真实成交价（含滑点）=====
-                actual_sell_price = price * (1 - SLIPPAGE)  # 卖出滑点
-                
-                # ===== 计算交易成本 =====
+                actual_sell_price = price * (1 - SLIPPAGE)
                 sell_amount = sell_shares * actual_sell_price
-                stamp_duty_cost = sell_amount * STAMP_DUTY  # 印花税
-                commission_cost = sell_amount * COMMISSION  # 佣金
+                stamp_duty_cost = sell_amount * STAMP_DUTY
+                commission_cost = sell_amount * COMMISSION
                 total_cost = stamp_duty_cost + commission_cost
                 
-                # 实际收入
                 actual_revenue = sell_amount - total_cost
                 profit_val = actual_revenue - (sell_shares * pos["cost"])
                 
+                # 更新交易统计（凯利公式用）
+                update_trade_stats(trade_stats, sym, profit_val)
+                
                 p["cash"] += actual_revenue
-                # 扣除股份
                 pos["total_shares"] -= sell_shares
-                pos["available_shares"] = 0 # 卖光了
+                pos["available_shares"] = 0
                 
-                alerts.append(f"🔴 **{sell_reason}**\n卖出标的：{name}\n成交均价：`{actual_sell_price:.3f}` (滑点后) | 卖出数量：`{sell_shares}股`\n交易成本：`{total_cost:.2f}元` | 本笔盈亏：`{profit_val:.2f}元`")
+                alerts.append(f"🔴 **{sell_reason}**\n卖出标的：{name}\n成交均价：`{actual_sell_price:.3f}` | 数量：`{sell_shares}股`\n本笔盈亏：`{profit_val:.2f}元`")
                 
-                # 如果一股都没了，彻底删掉持仓记录
                 if pos["total_shares"] == 0:
                     del p["positions"][sym]
-                continue # 卖完就不考虑买了，看下一个股票
+                continue
 
         # ==========================================
-        # 模块 3：买入逻辑 (日内异动点火) - 狂暴版
+        # 模块 3：统计学买入信号
         # ==========================================
         queue = p["price_queue"][sym]
-        if len(queue) == MOMENTUM_WINDOW:
-            # 计算滑动窗口内的涨速 (当前价 / N分钟前的价)
-            velocity = (price - queue[0]) / queue[0]
+        
+        if len(queue) >= 5:
+            # ===== 方法1: Z-Score 信号 =====
+            mean, std, z_score = calculate_statistics(queue)
             
-            # 【核心修改点】：不再判断现金是否大于固定值，而是直接算比例！
-            # 只要现金还大于 10000 元（最低买入底线），并且触发了阈值，且未持仓
-            if velocity >= SURGE_THRESHOLD and p["cash"] >= 10000 and sym not in p["positions"]:
-                # 动态计算本次应该打出多少子弹！
-                trade_amount = p["cash"] * TRADE_RATIO
+            # ===== 方法2: 布林带信号 =====
+            mid, upper, lower = calculate_bollinger_bands(queue)
+            
+            # 综合信号判断
+            buy_signal = False
+            signal_reason = ""
+            
+            # Z-Score 突破（突破均值+N倍标准差）
+            if z_score is not None and z_score >= Z_SCORE_THRESHOLD:
+                buy_signal = True
+                signal_reason = f"Z-Score={z_score:.2f}(>{Z_SCORE_THRESHOLD})"
+            
+            # 价格突破布林带上轨（动量信号）
+            if upper is not None and price > upper:
+                buy_signal = True
+                signal_reason = f"突破布林上轨({upper:.2f})"
+            
+            # 备用：固定阈值
+            velocity = (price - queue[0]) / queue[0] if queue[0] > 0 else 0
+            if velocity >= SURGE_THRESHOLD:
+                buy_signal = True
+                signal_reason = f"涨速={velocity*100:.2f}%(>{SURGE_THRESHOLD*100}%)"
+            
+            if buy_signal and p["cash"] >= 10000 and sym not in p["positions"]:
+                # 凯利公式计算最优仓位
+                kelly_ratio = get_symbol_kelly_ratio(trade_stats, sym)
                 
-                # ===== 计算真实买入价（含滑点）=====
-                actual_buy_price = price * (1 + SLIPPAGE)  # 买入滑点
+                # 取 AI 下发比例和凯利比例的最小值（更保守）
+                actual_ratio = min(TRADE_RATIO, kelly_ratio)
+                
+                trade_amount = p["cash"] * actual_ratio
+                actual_buy_price = price * (1 + SLIPPAGE)
                 
                 shares = int(trade_amount / actual_buy_price / 100) * 100
                 if shares > 0:
-                    # 计算实际成本
                     buy_amount = shares * actual_buy_price
-                    commission_cost = buy_amount * COMMISSION  # 佣金
+                    commission_cost = buy_amount * COMMISSION
                     total_cost = buy_amount + commission_cost
                     
                     p["cash"] -= total_cost
                     
-                    # 写入新持仓，成本价为滑点后价格
                     p["positions"][sym] = {
                         "total_shares": shares,
                         "available_shares": 0, 
-                        "cost": actual_buy_price,  # 真实成本价
+                        "cost": actual_buy_price,
                         "peak_price": actual_buy_price
                     }
-                    alerts.append(f"🚀 **满级火力追涨** (瞬时涨速: +{velocity*100:.2f}%)\n买入标的：{name}\n成交均价：`{actual_buy_price:.3f}` (滑点后) | 买入数量：`{shares}股`\n总成本：`{total_cost:.2f}元` (含佣金{commission_cost:.2f})\n⚠️ [系统锁定] 此筹码明日解锁。")
+                    
+                    alerts.append(f"🚀 **统计学信号触发** ({signal_reason})\n买入标的：{name}\n成交均价：`{actual_buy_price:.3f}` | 数量：`{shares}股`\n仓位比例：`{actual_ratio*100:.1f}%` (凯利建议{kelly_ratio*100:.1f}%)\n⚠️ [T+1锁定] 明日解锁。")
 
     # === 生成战报 ===
     if alerts:
-        # 计算当前总净值
         total_market_value = sum(pos["total_shares"] * data[s]["current"] for s, pos in p["positions"].items() if s in data)
         total_assets = p["cash"] + total_market_value
         return_pct = (total_assets - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
 
-        report = f"**🔥 APEX 巅峰高频量化战报**\n\n"
+        # 计算胜率
+        win_rate = (trade_stats["win_trades"] / trade_stats["total_trades"] * 100) if trade_stats["total_trades"] > 0 else 0
+
+        report = f"**🔥 APEX 统计学量化战报 v3.0**\n\n"
         for alert in alerts:
             report += f"{alert}\n\n"
         
@@ -263,14 +454,15 @@ def main():
         report += f"动态总资产: **{total_assets:.2f} 元** (收益: {return_pct:.2f}%)\n"
         report += f"持仓总市值: {total_market_value:.2f} 元\n"
         report += f"可用现金流: {p['cash']:.2f} 元\n"
+        report += f"历史胜率: {win_rate:.1f}% ({trade_stats['win_trades']}/{trade_stats['total_trades']})\n"
 
         payload = {
             "msg_type": "interactive",
             "card": {
                 "config": {"wide_screen_mode": True},
                 "header": {
-                    "title": {"tag": "plain_text", "content": "⚡ APEX 引擎极速交易警报"},
-                    "template": "purple"  # 用高贵的紫色代表高频量化
+                    "title": {"tag": "plain_text", "content": "⚡ APEX 统计学引擎 v3.0"},
+                    "template": "purple"
                 },
                 "elements": [{"tag": "markdown", "content": report}]
             }
