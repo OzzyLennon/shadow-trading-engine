@@ -25,17 +25,29 @@ load_env()
 # ================= 极限火力配置区域 =================
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 
-INITIAL_CAPITAL = 1000000.0  # 模拟盘 100 万起始资金
+INITIAL_CAPITAL = 1000000.0
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PORTFOLIO_FILE = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
 STATS_FILE = os.path.join(SCRIPT_DIR, "trade_stats.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "apex_daemon.log")
 
-# 守护进程参数
+# ================= 守护进程参数 =================
 POLL_INTERVAL = 5  # 轮询间隔（秒）
-TRADING_START = 9   # 交易开始时间
-TRADING_END = 15    # 交易结束时间
+
+# ================= 严格交易时段 =================
+MORNING_START = (9, 30)   # 上午开盘 09:30
+MORNING_END = (11, 30)    # 上午收盘 11:30
+AFTERNOON_START = (13, 0) # 下午开盘 13:00
+AFTERNOON_END = (14, 57)  # 下午收盘前（避开尾盘集合竞价）
+
+# ================= 交易冷却期 =================
+COOLDOWN_MINUTES = 5      # 买入后冷却期（分钟）
+ACCOUNT_COOLDOWN_MINUTES = 2  # 账户级冷却期
+
+# ================= 脏数据过滤 =================
+MIN_VALID_PRICE = 1.0     # 有效价格下限
+PRICE_CHANGE_LIMIT = 0.20 # 单次价格变化上限（20%），超过视为异常
 
 # 默认股票池
 DEFAULT_SYMBOLS = {
@@ -49,13 +61,16 @@ DEFAULT_SYMBOLS = {
 SYMBOLS = DEFAULT_SYMBOLS.copy()
 
 # ================= 统计学策略参数 =================
-MOMENTUM_WINDOW = 20        # 扩大窗口用于统计计算
-Z_SCORE_THRESHOLD = 2.0     # Z-Score 阈值（95%置信度）
-SURGE_THRESHOLD = 0.015     # 备用固定阈值
-STOP_LOSS_PCT = -0.08       # 止损线
-PROFIT_ACTIVATE = 0.05      # 止盈激活
-TRAILING_DROP = 0.03        # 回撤止盈
-TRADE_RATIO = 0.3           # 默认开火比例
+MOMENTUM_WINDOW = 20
+Z_SCORE_THRESHOLD = 2.0
+SURGE_THRESHOLD = 0.015
+STOP_LOSS_PCT = -0.08
+PROFIT_ACTIVATE = 0.05
+TRAILING_DROP = 0.03
+TRADE_RATIO = 0.3
+
+# ================= EMA 滤波参数 =================
+EMA_ALPHA = 0.3  # EMA 平滑系数 (0-1, 越小越平滑)
 
 # ================= 交易成本参数 =================
 SLIPPAGE = 0.002
@@ -63,10 +78,14 @@ STAMP_DUTY = 0.001
 COMMISSION = 0.00025
 
 # ================= 凯利公式参数 =================
-KELLY_FRACTION = 0.5        # 凯利系数折扣（使用半凯利，更保守）
+KELLY_FRACTION = 0.5
 
 # ================= 全局状态 =================
-running = True  # 控制循环运行
+running = True
+last_trade_times = {}  # 每只股票的最后交易时间
+last_account_trade = None  # 账户级最后交易时间
+ema_prices = {}  # EMA 平滑价格缓存
+prev_prices = {}  # 上一次有效价格（用于脏数据检测）
 
 def signal_handler(signum, frame):
     """优雅退出信号处理"""
@@ -75,12 +94,11 @@ def signal_handler(signum, frame):
     running = False
 
 def log(message):
-    """日志输出（同时打印和写入文件）"""
+    """日志输出"""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"[{timestamp}] {message}"
     print(log_line)
     
-    # 写入日志文件
     try:
         log_dir = os.path.dirname(LOG_FILE)
         if not os.path.exists(log_dir):
@@ -91,26 +109,132 @@ def log(message):
         pass
 
 def is_trading_time():
-    """检查是否在交易时段"""
-    now = datetime.datetime.now()
-    hour = now.hour
+    """
+    严格检查交易时段（排雷）
     
-    # 周末不交易
-    if now.weekday() >= 5:  # 5=周六, 6=周日
+    交易时段：
+    - 上午: 09:30 - 11:30
+    - 下午: 13:00 - 14:57（避开尾盘集合竞价）
+    
+    周末不交易
+    """
+    now = datetime.datetime.now()
+    
+    # 周末检查
+    if now.weekday() >= 5:
         return False
     
-    # 交易时段: 9:00 - 15:00
-    return TRADING_START <= hour < TRADING_END
+    current_time = (now.hour, now.minute)
+    
+    # 上午时段: 09:30 - 11:30
+    if MORNING_START <= current_time < MORNING_END:
+        return True
+    
+    # 下午时段: 13:00 - 14:57
+    if AFTERNOON_START <= current_time < AFTERNOON_END:
+        return True
+    
+    return False
 
+def is_in_cooldown(symbol):
+    """检查股票是否在冷却期"""
+    if symbol not in last_trade_times:
+        return False
+    
+    last_time = last_trade_times[symbol]
+    cooldown_delta = datetime.timedelta(minutes=COOLDOWN_MINUTES)
+    
+    return datetime.datetime.now() - last_time < cooldown_delta
+
+def is_account_in_cooldown():
+    """检查账户是否在冷却期"""
+    global last_account_trade
+    
+    if last_account_trade is None:
+        return False
+    
+    cooldown_delta = datetime.timedelta(minutes=ACCOUNT_COOLDOWN_MINUTES)
+    return datetime.datetime.now() - last_account_trade < cooldown_delta
+
+def update_trade_time(symbol):
+    """更新交易时间记录"""
+    global last_account_trade
+    last_trade_times[symbol] = datetime.datetime.now()
+    last_account_trade = datetime.datetime.now()
+
+# ===============================================
+# EMA 滤波器（过滤微观噪音）
+# ===============================================
+
+def calculate_ema(symbol, price):
+    """
+    EMA (指数移动平均) 滤波器
+    
+    EMA_t = α * price_t + (1-α) * EMA_{t-1}
+    
+    参数：
+    - α = EMA_ALPHA (0.3)
+    - α 越小，平滑效果越强
+    
+    作用：过滤 3 秒级 Tick 数据的随机噪音
+    """
+    global ema_prices
+    
+    if symbol not in ema_prices:
+        ema_prices[symbol] = price
+        return price
+    
+    # EMA 计算
+    ema = EMA_ALPHA * price + (1 - EMA_ALPHA) * ema_prices[symbol]
+    ema_prices[symbol] = ema
+    
+    return ema
+
+# ===============================================
+# 脏数据检测（排雷）
+# ===============================================
+
+def is_valid_price(symbol, price, name):
+    """
+    脏数据检测
+    
+    拦截条件：
+    1. price <= 0 (除零保护)
+    2. 价格过低 (< 1元，异常)
+    3. 单次变化超过 20% (停牌/网络抖动)
+    """
+    global prev_prices
+    
+    # 检查 1: 价格必须为正
+    if price <= 0:
+        log(f"⚠️ 脏数据拦截: {name} price={price} (<=0)")
+        return False
+    
+    # 检查 2: 价格下限
+    if price < MIN_VALID_PRICE:
+        log(f"⚠️ 脏数据拦截: {name} price={price} (低于下限)")
+        return False
+    
+    # 检查 3: 单次变化上限
+    if symbol in prev_prices:
+        prev = prev_prices[symbol]
+        if prev > 0:
+            change_pct = abs(price - prev) / prev
+            if change_pct > PRICE_CHANGE_LIMIT:
+                log(f"⚠️ 异常波动拦截: {name} 变化{change_pct*100:.1f}% ({prev} → {price})")
+                return False
+    
+    # 更新上一次有效价格
+    prev_prices[symbol] = price
+    
+    return True
+
+# ===============================================
+# 统计学核心
 # ===============================================
 
 def calculate_statistics(prices):
-    """
-    计算 Z-Score（精确版）
-    
-    Z-Score 衡量当前收益率偏离历史均值的程度：
-    Z = (r_t - μ) / σ
-    """
+    """Z-Score 计算"""
     if len(prices) < 2:
         return None, None, None
     
@@ -133,7 +257,7 @@ def calculate_statistics(prices):
     return mu, sigma, z_score
 
 def calculate_bollinger_bands(prices, k=2.0):
-    """计算布林带"""
+    """布林带"""
     if len(prices) < 5:
         return None, None, None
     
@@ -147,10 +271,7 @@ def calculate_bollinger_bands(prices, k=2.0):
     return mid, upper, lower
 
 def calculate_kelly_fraction(win_rate, win_loss_ratio):
-    """
-    凯利公式（精确版）：
-    f* = (bp - (1-p)) / b
-    """
+    """凯利公式"""
     if win_rate <= 0 or win_loss_ratio <= 0:
         return 0.1
     
@@ -210,7 +331,7 @@ def update_trade_stats(stats, symbol, profit):
     save_trade_stats(stats)
 
 def get_symbol_kelly_ratio(stats, symbol):
-    """根据历史数据计算某只股票的凯利比例"""
+    """计算凯利比例"""
     if symbol not in stats["symbols"]:
         return TRADE_RATIO
     
@@ -233,9 +354,7 @@ def get_symbol_kelly_ratio(stats, symbol):
     return max(kelly, 0.05)
 
 def calculate_var(portfolio_value, returns_history, confidence=0.99):
-    """
-    计算在险价值 VaR
-    """
+    """计算 VaR"""
     if len(returns_history) < 10:
         return 0, 0
     
@@ -250,7 +369,7 @@ def calculate_var(portfolio_value, returns_history, confidence=0.99):
     return var, var_pct
 
 def load_ai_config():
-    """读取AI大脑下发的每日作战参数"""
+    """读取 AI 配置"""
     global SURGE_THRESHOLD, STOP_LOSS_PCT, TRADE_RATIO, SYMBOLS, SLIPPAGE, STAMP_DUTY, COMMISSION, Z_SCORE_THRESHOLD
     try:
         if os.path.exists(CONFIG_FILE):
@@ -275,6 +394,7 @@ def load_ai_config():
         return False
 
 def load_portfolio():
+    """加载账本"""
     today_str = str(datetime.date.today())
     if os.path.exists(PORTFOLIO_FILE):
         try:
@@ -298,10 +418,12 @@ def load_portfolio():
     }
 
 def save_portfolio(portfolio):
+    """保存账本"""
     with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
         json.dump(portfolio, f, indent=4)
 
 def get_market_data(symbols):
+    """获取市场数据"""
     url = f"http://hq.sinajs.cn/list={','.join(symbols)}"
     headers = {'Referer': 'http://finance.sina.com.cn'} 
     market_data = {}
@@ -324,11 +446,11 @@ def send_alert(alerts, total_assets, total_market_value, cash, win_rate, total_t
     """发送飞书警报"""
     return_pct = (total_assets - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
 
-    report = f"**🔥 APEX 统计学引擎 v4.0 (实时守护模式)**\n\n"
+    report = f"**🔥 APEX 统计学引擎 v4.1 (排雷版)**\n\n"
     for alert in alerts:
         report += f"{alert}\n\n"
     
-    report += f"---\n**💼 账户总览 (初始100万)**\n"
+    report += f"---\n**💼 账户总览**\n"
     report += f"动态总资产: **{total_assets:.2f} 元** (收益: {return_pct:.2f}%)\n"
     report += f"持仓总市值: {total_market_value:.2f} 元\n"
     report += f"可用现金流: {cash:.2f} 元\n"
@@ -351,7 +473,7 @@ def send_alert(alerts, total_assets, total_market_value, cash, win_rate, total_t
         log(f"飞书推送失败: {e}")
 
 def scan_market():
-    """单次市场扫描"""
+    """市场扫描"""
     p = load_portfolio()
     data = get_market_data(list(SYMBOLS.keys()))
     if not data:
@@ -360,11 +482,10 @@ def scan_market():
     trade_stats = load_trade_stats()
     alerts = []
     
-    # 计算组合总净值
     total_market_value = sum(pos["total_shares"] * data[s]["current"] for s, pos in p["positions"].items() if s in data)
     total_assets = p["cash"] + total_market_value
     
-    # 计算历史收益率序列（用于 VaR）
+    # VaR 预警
     all_returns = []
     for sym in p["price_queue"]:
         prices = p["price_queue"][sym]
@@ -372,46 +493,51 @@ def scan_market():
             r = (prices[i] - prices[i-1]) / prices[i-1]
             all_returns.append(r)
     
-    # VaR 预警
     if len(all_returns) >= 10:
         var, var_pct = calculate_var(total_assets, all_returns)
         if var_pct > 3:
-            alerts.append(f"⚠️ **VaR 风险警报**: 今日潜在最大损失 `{var:.2f}元` ({var_pct:.2f}%)")
+            alerts.append(f"⚠️ **VaR 风险警报**: {var:.2f}元 ({var_pct:.2f}%)")
     
     for sym, info in data.items():
         price = info["current"]
         name = info["name"]
-        if price <= 0: continue
-
-        # 更新价格队列
+        
+        # ===== 脏数据检测 =====
+        if not is_valid_price(sym, price, name):
+            continue
+        
+        # ===== EMA 滤波 =====
+        smoothed_price = calculate_ema(sym, price)
+        
+        # 更新价格队列（使用平滑后的价格）
         if sym not in p["price_queue"]:
             p["price_queue"][sym] = []
-        p["price_queue"][sym].append(price)
+        p["price_queue"][sym].append(smoothed_price)
         
         if len(p["price_queue"][sym]) > MOMENTUM_WINDOW:
             p["price_queue"][sym].pop(0)
 
-        # 卖出逻辑
+        # ===== 卖出逻辑 =====
         if sym in p["positions"]:
             pos = p["positions"][sym]
             
-            if price > pos["peak_price"]:
-                pos["peak_price"] = price
+            if smoothed_price > pos["peak_price"]:
+                pos["peak_price"] = smoothed_price
 
-            profit_pct = (price - pos["cost"]) / pos["cost"]
-            drop_from_peak = (pos["peak_price"] - price) / pos["peak_price"]
+            profit_pct = (smoothed_price - pos["cost"]) / pos["cost"]
+            drop_from_peak = (pos["peak_price"] - smoothed_price) / pos["peak_price"]
             
             sell_reason = None
             
             if profit_pct >= PROFIT_ACTIVATE and drop_from_peak >= TRAILING_DROP:
-                sell_reason = f"🏆 追踪止盈触发 (触顶回落{drop_from_peak*100:.1f}%)"
+                sell_reason = f"🏆 追踪止盈 (回落{drop_from_peak*100:.1f}%)"
             elif profit_pct <= STOP_LOSS_PCT:
-                sell_reason = f"🩸 铁血止损触发 (亏损{profit_pct*100:.1f}%)"
+                sell_reason = f"🩸 铁血止损 (亏损{profit_pct*100:.1f}%)"
 
             if sell_reason and pos["available_shares"] > 0:
                 sell_shares = pos["available_shares"]
                 
-                actual_sell_price = price * (1 - SLIPPAGE)
+                actual_sell_price = smoothed_price * (1 - SLIPPAGE)
                 sell_amount = sell_shares * actual_sell_price
                 stamp_duty_cost = sell_amount * STAMP_DUTY
                 commission_cost = sell_amount * COMMISSION
@@ -426,13 +552,22 @@ def scan_market():
                 pos["total_shares"] -= sell_shares
                 pos["available_shares"] = 0
                 
-                alerts.append(f"🔴 **{sell_reason}**\n卖出：{name} @ `{actual_sell_price:.3f}` | `{sell_shares}股`\n盈亏：`{profit_val:.2f}元`")
+                alerts.append(f"🔴 **{sell_reason}**\n卖出：{name} @ `{actual_sell_price:.3f}` | 盈亏：`{profit_val:.2f}元`")
                 
                 if pos["total_shares"] == 0:
                     del p["positions"][sym]
                 continue
 
-        # 买入逻辑
+        # ===== 买入逻辑（含冷却期检查）=====
+        
+        # 冷却期检查 1: 股票级别
+        if is_in_cooldown(sym):
+            continue
+        
+        # 冷却期检查 2: 账户级别
+        if is_account_in_cooldown():
+            continue
+        
         queue = p["price_queue"][sym]
         
         if len(queue) >= 5:
@@ -444,23 +579,23 @@ def scan_market():
             
             if z_score is not None and z_score >= Z_SCORE_THRESHOLD:
                 buy_signal = True
-                signal_reason = f"Z-Score={z_score:.2f}"
+                signal_reason = f"Z={z_score:.2f}"
             
-            if upper is not None and price > upper:
+            if upper is not None and smoothed_price > upper:
                 buy_signal = True
-                signal_reason = f"突破布林上轨"
+                signal_reason = f"突破布林"
             
-            velocity = (price - queue[0]) / queue[0] if queue[0] > 0 else 0
+            velocity = (smoothed_price - queue[0]) / queue[0] if queue[0] > 0 else 0
             if velocity >= SURGE_THRESHOLD:
                 buy_signal = True
-                signal_reason = f"涨速={velocity*100:.2f}%"
+                signal_reason = f"涨速{velocity*100:.1f}%"
             
             if buy_signal and p["cash"] >= 10000 and sym not in p["positions"]:
                 kelly_ratio = get_symbol_kelly_ratio(trade_stats, sym)
                 actual_ratio = min(TRADE_RATIO, kelly_ratio)
                 
                 trade_amount = p["cash"] * actual_ratio
-                actual_buy_price = price * (1 + SLIPPAGE)
+                actual_buy_price = smoothed_price * (1 + SLIPPAGE)
                 
                 shares = int(trade_amount / actual_buy_price / 100) * 100
                 if shares > 0:
@@ -477,9 +612,11 @@ def scan_market():
                         "peak_price": actual_buy_price
                     }
                     
-                    alerts.append(f"🚀 **统计学信号** ({signal_reason})\n买入：{name} @ `{actual_buy_price:.3f}` | `{shares}股`\n仓位：`{actual_ratio*100:.1f}%`")
+                    # 更新冷却期
+                    update_trade_time(sym)
+                    
+                    alerts.append(f"🚀 **信号触发** ({signal_reason})\n买入：{name} @ `{actual_buy_price:.3f}` | `{shares}股`\n冷却期：{COOLDOWN_MINUTES}分钟")
 
-    # 发送警报
     if alerts:
         win_rate = (trade_stats["win_trades"] / trade_stats["total_trades"] * 100) if trade_stats["total_trades"] > 0 else 0
         send_alert(alerts, total_assets, total_market_value, p["cash"], win_rate, trade_stats["total_trades"], trade_stats["win_trades"])
@@ -490,49 +627,46 @@ def main():
     """守护进程主循环"""
     global running
     
-    # 注册信号处理
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     log("="*50)
-    log("🚀 APEX 统计学量化引擎 v4.0 (实时守护模式)")
-    log(f"📊 轮询间隔: {POLL_INTERVAL}秒")
-    log(f"⏰ 交易时段: {TRADING_START}:00 - {TRADING_END}:00")
+    log("🚀 APEX 统计学量化引擎 v4.1 (排雷版)")
+    log(f"📊 轮询间隔: {POLL_INTERVAL}秒 | EMA滤波: α={EMA_ALPHA}")
+    log(f"🔒 交易时段: {MORNING_START[0]:02d}:{MORNING_START[1]:02d}-{AFTERNOON_END[0]:02d}:{AFTERNOON_END[1]:02d}")
+    log(f"❄️ 冷却期: 股票{COOLDOWN_MINUTES}分钟 | 账户{ACCOUNT_COOLDOWN_MINUTES}分钟")
     log("="*50)
     
-    # 加载配置
     if load_ai_config():
         log(f"🧠 已加载AI参数 | 监控 {len(SYMBOLS)} 只标的")
     else:
         log("⚠️ 使用默认参数")
     
     last_config_check = datetime.datetime.now()
-    config_check_interval = 300  # 5分钟检查一次配置更新
+    config_check_interval = 300
     
     while running:
         try:
             now = datetime.datetime.now()
             
-            # 定期检查配置更新
             if (now - last_config_check).total_seconds() > config_check_interval:
                 if load_ai_config():
                     log("🔄 配置已更新")
                 last_config_check = now
             
-            # 检查交易时段
+            # 严格交易时段检查
             if is_trading_time():
                 scan_market()
             else:
-                # 非交易时段，降低检查频率
+                # 非交易时段，降低频率
                 time.sleep(60)
                 continue
             
-            # 等待下一次扫描
             time.sleep(POLL_INTERVAL)
             
         except Exception as e:
             log(f"❌ 异常: {e}")
-            time.sleep(10)  # 异常后等待10秒
+            time.sleep(10)
     
     log("👋 守护进程已停止")
 
