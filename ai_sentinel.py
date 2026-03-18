@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-AI Sentinel V5.0 - 宏观风控哨兵
-================================
-角色：从"参数微调器"升维为"黑天鹅熔断器"
+AI Sentinel V3.0 - 全局多战区风控司令
+=====================================
+角色：双引擎定向熔断系统
 
 核心职责：
-1. 监控逻辑破坏型暴跌（Regime Shift）
-2. 输出 allow_trading 风控开关
-3. 绝不篡改经WFA验证的底层数理参数
+1. 同时监控 Red Engine (红利) 和 Blue Engine (科技)
+2. 输出 red_engine_allow / blue_engine_allow 双通道权限矩阵
+3. 定向熔断：煤炭政策打击 → Red熔断 Blue继续；芯片禁令 → Blue熔断 Red继续
 
-作者: AI量化风控官
-版本: 5.0.0
+版本: 3.0.0
 日期: 2026-03-18
 """
 
@@ -44,7 +43,6 @@ LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "ai_sentinel.log")
 
 # ================= 工具函数 =================
 def log(message):
-    """记录日志"""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"[{timestamp}] {message}"
     print(log_line)
@@ -71,72 +69,56 @@ def fetch_morning_news():
             summary = item.get('summary', '')
             if title:
                 news_list.append(f"【{title}】{summary}")
-        return "\n".join(news_list[:15])  # 取前15条
+        return "\n".join(news_list[:20])
     except Exception as e:
         log(f"⚠️ 新闻抓取失败: {e}")
         return "今日暂无重大宏观新闻。"
 
-def fetch_policy_news():
-    """获取政策相关新闻（重点关注煤炭/电力/分红政策）"""
-    log("🏛️ 正在获取政策面资讯...")
-    
-    keywords = ["煤炭", "电力", "电价", "煤价", "分红", "国企", "能源", "发改委"]
-    policy_news = []
-    
-    try:
-        # 新浪财经搜索
-        url = "https://search.sina.com.cn/?q=煤炭+电力+政策&c=news&from=channel&ie=utf-8"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers, timeout=10)
-        # 这里简化处理，实际可以解析HTML
-    except Exception as e:
-        log(f"⚠️ 政策新闻获取失败: {e}")
-    
-    return policy_news
-
 def call_llm_risk_assessment(news_content):
     """
-    调用大模型进行风险研判
+    调用大模型进行双引擎风险研判
     
     输出格式：
     {
-        "market_regime": "NORMAL / BLACK_SWAN",
-        "reasoning": "判断理由",
-        "allow_trading": true/false
+        "red_engine_allow": true/false,
+        "red_reasoning": "红利板块风控判断理由",
+        "blue_engine_allow": true/false,
+        "blue_reasoning": "科技板块风控判断理由",
+        "global_market_status": "NORMAL / BLACK_SWAN"
     }
     """
     if not LLM_API_KEY:
-        log("⚠️ 未配置LLM API密钥，默认允许交易")
+        log("⚠️ 未配置LLM API密钥，默认允许双引擎交易")
         return {
-            "market_regime": "NORMAL",
-            "reasoning": "LLM未配置，采用默认允许",
-            "allow_trading": True
+            "red_engine_allow": True,
+            "red_reasoning": "LLM未配置，采用默认允许",
+            "blue_engine_allow": True,
+            "blue_reasoning": "LLM未配置，采用默认允许",
+            "global_market_status": "NORMAL"
         }
     
-    system_prompt = """你是一位顶尖的 A 股宏观风控官。我们的量化引擎目前全仓聚焦于【煤电一体化与红利低波】板块（中国神华、国投电力、大唐发电）。
+    system_prompt = """你是一位顶尖的 A 股量化基金宏观风控官。我们的基金目前部署了两个完全独立的交易引擎：
 
-该策略的核心逻辑是：依靠公用事业的稳定盈利和高股息进行超跌抄底。
+1. 【Red Engine】(红利防守军团)：持仓中国神华、国投电力等煤电一体化股票。核心风险：国家出台严厉政策限制煤价/电价利润、针对国企分红比例的负面政策调整。
+2. 【Blue Engine】(科技进攻军团)：持仓中际旭创，寒武纪、工业富联等 AI 与半导体龙头。核心风险：美国出台极其严厉的芯片/算力制裁禁令、国家级针对 AI 行业的重大打压政策。
 
-请阅读以下今日早盘新闻，并判断是否存在会【摧毁该板块底层逻辑】的系统性黑天鹅事件。
+请阅读以下今日早盘的宏观与行业新闻，并分别判断两个战区是否存在【摧毁其底层逻辑的黑天鹅事件】。
+如果只是普通的市场涨跌，请保持交易通道开启。
 
-致命的黑天鹅包括但不限于：
-1. 国家出台严厉政策限制煤价或电价利润（如限制煤炭企业暴利、电价市场化改革冲击）。
-2. 针对国企分红比例的负面政策调整（如强制降低分红率、征收红利税）。
-3. 极端的系统性股灾或流动性枯竭危机（如2015年式千股跌停）。
-4. 重大地缘政治冲突导致能源供应链断裂。
-
-如果不包含上述致命危机，即使大盘普通下跌，也请保持交易通道开启。"""
+请严格输出以下 JSON 格式：
+{
+    "red_engine_allow": true 或 false,
+    "red_reasoning": "红利板块风控判断理由",
+    "blue_engine_allow": true 或 false,
+    "blue_reasoning": "科技板块风控判断理由",
+    "global_market_status": "NORMAL / BLACK_SWAN"
+}"""
 
     user_prompt = f"""今日早盘新闻：
 
 {news_content}
 
-请输出 JSON 格式：
-{{
-    "market_regime": "NORMAL (正常震荡) / BLACK_SWAN (黑天鹅预警)",
-    "reasoning": "详细的风控判断理由，说明是否检测到逻辑破坏型事件",
-    "allow_trading": true 或 false
-}}"""
+请严格按照 JSON 格式输出上述字段。"""
 
     try:
         headers = {
@@ -150,7 +132,7 @@ def call_llm_risk_assessment(news_content):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.3,  # 低温度，更确定性输出
+            "temperature": 0.3,
             "response_format": {"type": "json_object"}
         }
         
@@ -164,77 +146,86 @@ def call_llm_risk_assessment(news_content):
         
     except Exception as e:
         log(f"❌ LLM调用失败: {e}")
-        # 失败时默认允许交易（保守策略）
         return {
-            "market_regime": "NORMAL",
-            "reasoning": f"LLM调用异常: {str(e)}，默认允许交易",
-            "allow_trading": True
+            "red_engine_allow": True,
+            "red_reasoning": f"LLM调用异常: {str(e)}，默认允许",
+            "blue_engine_allow": True,
+            "blue_reasoning": f"LLM调用异常: {str(e)}，默认允许",
+            "global_market_status": "NORMAL"
         }
 
 def save_risk_config(risk_assessment):
-    """保存风控配置到 daily_config.json"""
+    """保存双引擎风控配置到 daily_config.json"""
     try:
         config = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
         
-        # 更新风控字段
-        config["allow_trading"] = risk_assessment.get("allow_trading", True)
-        config["market_regime"] = risk_assessment.get("market_regime", "NORMAL")
-        config["risk_reasoning"] = risk_assessment.get("reasoning", "")
+        # 更新双引擎风控字段
+        config["red_engine_allow"] = risk_assessment.get("red_engine_allow", True)
+        config["red_reasoning"] = risk_assessment.get("red_reasoning", "")
+        config["blue_engine_allow"] = risk_assessment.get("blue_engine_allow", True)
+        config["blue_reasoning"] = risk_assessment.get("blue_reasoning", "")
+        config["global_market_status"] = risk_assessment.get("global_market_status", "NORMAL")
+        
+        # 兼容旧字段（如果AI Brain还在用）
+        config["allow_trading"] = risk_assessment.get("red_engine_allow", True)
+        config["market_regime"] = risk_assessment.get("global_market_status", "NORMAL")
+        
         config["risk_updated_at"] = datetime.datetime.now().isoformat()
-        
-        # 保留策略参数（绝不篡改）
-        config["strategy_params"] = config.get("strategy_params", {
-            "z_threshold": -1.5,
-            "window": 10,
-            "trade_ratio": 0.3,
-            "stop_loss": 0.10
-        })
-        
-        config["portfolio"] = config.get("portfolio", {
-            "symbols": {
-                "sh600886": {"name": "国投电力", "sector": "水电龙头"},
-                "sh601088": {"name": "中国神华", "sector": "煤电一体化"},
-                "sh601991": {"name": "大唐发电", "sector": "火电转型"}
-            }
-        })
         
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
         
-        log(f"💾 风控配置已保存: allow_trading={config['allow_trading']}")
+        log(f"💾 风控配置已保存: red={config['red_engine_allow']}, blue={config['blue_engine_allow']}")
         
     except Exception as e:
         log(f"❌ 保存配置失败: {e}")
 
 def send_risk_alert(risk_assessment):
-    """发送风控警报到飞书"""
+    """发送双引擎风控警报到飞书"""
     if not FEISHU_WEBHOOK:
         return
     
-    regime = risk_assessment.get("market_regime", "NORMAL")
-    allow = risk_assessment.get("allow_trading", True)
-    reasoning = risk_assessment.get("reasoning", "")
+    red_allow = risk_assessment.get("red_engine_allow", True)
+    blue_allow = risk_assessment.get("blue_engine_allow", True)
+    global_status = risk_assessment.get("global_market_status", "NORMAL")
+    red_reason = risk_assessment.get("red_reasoning", "")
+    blue_reason = risk_assessment.get("blue_reasoning", "")
     
-    # 根据风险等级选择颜色
-    template = "green" if allow else "red"
-    status_emoji = "✅" if allow else "🚫"
-    status_text = "交易通道开启" if allow else "交易通道关闭"
+    # 确定状态
+    if not red_allow and not blue_allow:
+        template = "red"
+        status = "🚫 双引擎熔断"
+    elif not red_allow:
+        template = "orange"
+        status = "🟠 Red Engine 熔断"
+    elif not blue_allow:
+        template = "blue"
+        status = "🔵 Blue Engine 熔断"
+    else:
+        template = "green"
+        status = "✅ 双引擎通行"
     
-    report = f"**{status_emoji} AI风控哨兵 V5.0 晨报**\n\n"
-    report += f"**市场状态**: {regime}\n"
-    report += f"**交易权限**: {status_text}\n\n"
-    report += f"**研判理由**:\n{reasoning}\n\n"
-    report += f"---\n*更新时间: {datetime.datetime.now().strftime('%H:%M')}*"
+    report = f"**🛡️ AI Sentinel V3.0 - 全局风控司令**\n\n"
+    report += f"**全局状态**: {global_status}\n"
+    report += f"**交易权限**: {status}\n\n"
+    report += f"---\n"
+    report += f"**🔴 Red Engine (红利)**\n"
+    report += f"状态: {'✅ 允许' if red_allow else '🚫 熔断'}\n"
+    report += f"理由: {red_reason[:150]}...\n\n"
+    report += f"**🔵 Blue Engine (科技)**\n"
+    report += f"状态: {'✅ 允许' if blue_allow else '🚫 熔断'}\n"
+    report += f"理由: {blue_reason[:150]}...\n"
+    report += f"\n---\n*更新时间: {datetime.datetime.now().strftime('%H:%M')}*"
     
     payload = {
         "msg_type": "interactive",
         "card": {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "🛡️ 宏观风控警报"},
+                "title": {"tag": "plain_text", "content": "🛡️ 双引擎风控矩阵"},
                 "template": template
             },
             "elements": [{"tag": "markdown", "content": report}]
@@ -247,24 +238,23 @@ def send_risk_alert(risk_assessment):
         log(f"⚠️ 飞书推送失败: {e}")
 
 def main():
-    """主函数：每日早盘执行一次"""
     log("="*60)
-    log("🧠 AI Sentinel V5.0 - 宏观风控哨兵启动")
+    log("🧠 AI Sentinel V3.0 - 全局多战区风控司令启动")
     log("="*60)
     
     # 1. 获取新闻
     news = fetch_morning_news()
     log(f"📰 获取到 {len(news)} 字符新闻内容")
     
-    # 2. LLM风险研判
-    log("🤖 正在调用大模型进行风险研判...")
+    # 2. LLM双引擎风险研判
+    log("🤖 正在调用大模型进行双引擎风险研判...")
     risk_assessment = call_llm_risk_assessment(news)
     
     # 3. 输出结果
     log(f"\n📊 风控研判结果:")
-    log(f"   市场状态: {risk_assessment.get('market_regime', 'UNKNOWN')}")
-    log(f"   交易权限: {'允许' if risk_assessment.get('allow_trading') else '禁止'}")
-    log(f"   研判理由: {risk_assessment.get('reasoning', 'N/A')[:100]}...")
+    log(f"   全局状态: {risk_assessment.get('global_market_status', 'UNKNOWN')}")
+    log(f"   🔴 Red Engine: {'允许' if risk_assessment.get('red_engine_allow') else '熔断'}")
+    log(f"   🔵 Blue Engine: {'允许' if risk_assessment.get('blue_engine_allow') else '熔断'}")
     
     # 4. 保存配置
     save_risk_config(risk_assessment)
