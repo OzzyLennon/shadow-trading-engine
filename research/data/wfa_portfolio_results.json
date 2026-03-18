@@ -1,0 +1,472 @@
+[
+  {
+    "symbol": "sh600000",
+    "name": "浦发银行",
+    "windows": 6,
+    "avg_return": -0.10381487569483483,
+    "win_rate": 0.0,
+    "cumulative": -0.6228892541690123,
+    "results": [
+      {
+        "window": {
+          "train_start": "2022-01-04",
+          "train_end": "2023-01-16",
+          "test_start": "2023-01-17",
+          "test_end": "2023-07-26"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2022-04-12",
+          "train_end": "2023-04-21",
+          "test_start": "2023-04-24",
+          "test_end": "2023-10-31"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2022-07-14",
+          "train_end": "2023-07-26",
+          "test_start": "2023-07-27",
+          "test_end": "2024-01-29"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": -0.622889254169009
+      },
+      {
+        "window": {
+          "train_start": "2022-10-19",
+          "train_end": "2023-10-31",
+          "test_start": "2023-11-01",
+          "test_end": "2024-05-10"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2023-01-17",
+          "train_end": "2024-01-29",
+          "test_start": "2024-01-30",
+          "test_end": "2024-08-08"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2023-04-24",
+          "train_end": "2024-05-10",
+          "test_start": "2024-05-13",
+          "test_end": "2024-11-14"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      }
+    ]
+  },
+  {
+    "symbol": "sh601318",
+    "name": "中国平安",
+    "windows": 6,
+    "avg_return": -0.17466431885893355,
+    "win_rate": 50.0,
+    "cumulative": -1.0524817043714774,
+    "results": [
+      {
+        "window": {
+          "train_start": "2022-01-04",
+          "train_end": "2023-01-16",
+          "test_start": "2023-01-17",
+          "test_end": "2023-07-26"
+        },
+        "best_params": {
+          "z_threshold": -1.5,
+          "window": 10,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.024934983818599182
+      },
+      {
+        "window": {
+          "train_start": "2022-04-12",
+          "train_end": "2023-04-21",
+          "test_start": "2023-04-24",
+          "test_end": "2023-10-31"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": -0.9039640241265516
+      },
+      {
+        "window": {
+          "train_start": "2022-07-14",
+          "train_end": "2023-07-26",
+          "test_start": "2023-07-27",
+          "test_end": "2024-01-29"
+        },
+        "best_params": {
+          "z_threshold": -1.5,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.02016416547237986
+      },
+      {
+        "window": {
+          "train_start": "2022-10-19",
+          "train_end": "2023-10-31",
+          "test_start": "2023-11-01",
+          "test_end": "2024-05-10"
+        },
+        "best_params": {
+          "z_threshold": -1.5,
+          "window": 10,
+          "trade_ratio": 0.3
+        },
+        "test_return": -0.8598791680453716
+      },
+      {
+        "window": {
+          "train_start": "2023-01-17",
+          "train_end": "2024-01-29",
+          "test_start": "2024-01-30",
+          "test_end": "2024-08-08"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.6707581297273428
+      },
+      {
+        "window": {
+          "train_start": "2023-04-24",
+          "train_end": "2024-05-10",
+          "test_start": "2024-05-13",
+          "test_end": "2024-11-14"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      }
+    ]
+  },
+  {
+    "symbol": "sh600030",
+    "name": "中信证券",
+    "windows": 6,
+    "avg_return": -0.02258241878543432,
+    "win_rate": 50.0,
+    "cumulative": -0.1955185676276172,
+    "results": [
+      {
+        "window": {
+          "train_start": "2022-01-04",
+          "train_end": "2023-01-31",
+          "test_start": "2023-02-01",
+          "test_end": "2023-08-03"
+        },
+        "best_params": {
+          "z_threshold": -1.5,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": -2.069959402835768
+      },
+      {
+        "window": {
+          "train_start": "2022-04-20",
+          "train_end": "2023-05-04",
+          "test_start": "2023-05-05",
+          "test_end": "2023-11-08"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 10,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.7945480699264169
+      },
+      {
+        "window": {
+          "train_start": "2022-07-22",
+          "train_end": "2023-08-03",
+          "test_start": "2023-08-04",
+          "test_end": "2024-02-06"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 1.5351037920079007
+      },
+      {
+        "window": {
+          "train_start": "2022-10-27",
+          "train_end": "2023-11-08",
+          "test_start": "2023-11-09",
+          "test_end": "2024-05-20"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 10,
+          "trade_ratio": 0.3
+        },
+        "test_return": 1.6335880972161612
+      },
+      {
+        "window": {
+          "train_start": "2023-02-01",
+          "train_end": "2024-02-06",
+          "test_start": "2024-02-07",
+          "test_end": "2024-08-16"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": -1.1266491579371836
+      },
+      {
+        "window": {
+          "train_start": "2023-05-05",
+          "train_end": "2024-05-20",
+          "test_start": "2024-05-21",
+          "test_end": "2024-11-22"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": -0.902125911090133
+      }
+    ]
+  },
+  {
+    "symbol": "sh600519",
+    "name": "贵州茅台",
+    "windows": 6,
+    "avg_return": 0.01353832141721222,
+    "win_rate": 16.666666666666664,
+    "cumulative": 0.08122992850327915,
+    "results": [
+      {
+        "window": {
+          "train_start": "2022-01-04",
+          "train_end": "2023-01-16",
+          "test_start": "2023-01-17",
+          "test_end": "2023-07-26"
+        },
+        "best_params": {
+          "z_threshold": -1.5,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.08122992850327332
+      },
+      {
+        "window": {
+          "train_start": "2022-04-12",
+          "train_end": "2023-04-21",
+          "test_start": "2023-04-24",
+          "test_end": "2023-10-31"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2022-07-14",
+          "train_end": "2023-07-26",
+          "test_start": "2023-07-27",
+          "test_end": "2024-01-29"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2022-10-19",
+          "train_end": "2023-10-31",
+          "test_start": "2023-11-01",
+          "test_end": "2024-05-10"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2023-01-17",
+          "train_end": "2024-01-29",
+          "test_start": "2024-01-30",
+          "test_end": "2024-08-08"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      },
+      {
+        "window": {
+          "train_start": "2023-04-24",
+          "train_end": "2024-05-10",
+          "test_start": "2024-05-13",
+          "test_end": "2024-11-14"
+        },
+        "best_params": {
+          "z_threshold": -2.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0
+      }
+    ]
+  },
+  {
+    "symbol": "sh601088",
+    "name": "中国神华",
+    "windows": 6,
+    "avg_return": 1.679616944760064,
+    "win_rate": 100.0,
+    "cumulative": 10.467691869716699,
+    "results": [
+      {
+        "window": {
+          "train_start": "2022-01-04",
+          "train_end": "2023-01-16",
+          "test_start": "2023-01-17",
+          "test_end": "2023-07-26"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 1.4051124972468876
+      },
+      {
+        "window": {
+          "train_start": "2022-04-12",
+          "train_end": "2023-04-21",
+          "test_start": "2023-04-24",
+          "test_end": "2023-10-31"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.8794981910210569
+      },
+      {
+        "window": {
+          "train_start": "2022-07-14",
+          "train_end": "2023-07-26",
+          "test_start": "2023-07-27",
+          "test_end": "2024-01-29"
+        },
+        "best_params": {
+          "z_threshold": -1.5,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 0.6081426062372578
+      },
+      {
+        "window": {
+          "train_start": "2022-10-19",
+          "train_end": "2023-10-31",
+          "test_start": "2023-11-01",
+          "test_end": "2024-05-10"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 1.0069443469419725
+      },
+      {
+        "window": {
+          "train_start": "2023-01-17",
+          "train_end": "2024-01-29",
+          "test_start": "2024-01-30",
+          "test_end": "2024-08-08"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 15,
+          "trade_ratio": 0.3
+        },
+        "test_return": 2.1436934687444342
+      },
+      {
+        "window": {
+          "train_start": "2023-04-24",
+          "train_end": "2024-05-10",
+          "test_start": "2024-05-13",
+          "test_end": "2024-11-14"
+        },
+        "best_params": {
+          "z_threshold": -1.0,
+          "window": 5,
+          "trade_ratio": 0.3
+        },
+        "test_return": 4.034310558368773
+      }
+    ]
+  }
+]
