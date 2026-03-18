@@ -210,8 +210,33 @@ def send_alert(alerts, p, data):
     try: requests.post(FEISHU_WEBHOOK, json=payload)
     except: pass
 
+# ================= 新增：读取 AI 风控权限 =================
+def check_ai_permission():
+    """检查 Blue Engine 的交易权限"""
+    config_path = os.path.join(SCRIPT_DIR, "daily_config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                # 专门读取 Blue Engine 的权限字段
+                if config.get("blue_engine_allow") is False:
+                    return False, config.get("blue_reasoning", "AI 判定科技板块存在宏观风险")
+        except:
+            pass
+    # 默认允许交易（防止配置文件读取失败导致停机）
+    return True, "OK"
+
 # ================= 核心扫描引擎 =================
 def scan_market():
+    # 1. 每次扫描前，先问问 AI 总司令给没给权限
+    allow_trading, reason = check_ai_permission()
+
+    if not allow_trading:
+        # 如果被 AI 拔了网线，记录一条心跳日志并直接 return，不执行后续的买卖逻辑
+        log(f"🔒 [风控熔断] Blue Engine 已被 AI 大脑锁定。原因: {reason}")
+        return
+
+    # 2. 以下为原有的数据拉取和交易扫描逻辑...
     p = load_portfolio()
     data = get_market_data()
     if not data: return

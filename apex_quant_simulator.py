@@ -145,11 +145,15 @@ def calculate_z_score(prices):
     return (r_t - mu) / sigma if sigma > 0 else 0.0
 
 def check_allow_trading():
-    """检查 AI 大脑是否允许交易（风控开关）"""
+    """检查 AI 大脑是否允许 Red Engine 交易（风控开关）"""
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
+                # 优先读取 red_engine_allow 字段（V3.0双控模式）
+                if "red_engine_allow" in config:
+                    return config.get("red_engine_allow", True)
+                # 兼容旧字段
                 return config.get("allow_trading", True)
     except: pass
     return True  # 默认允许
