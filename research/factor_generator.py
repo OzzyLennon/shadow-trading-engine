@@ -33,6 +33,10 @@ LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "factor_mining.log")
 IC_THRESHOLD = 0.03      # |Mean IC| > 0.03
 IR_THRESHOLD = 0.15      # |IR| > 0.15 (熊市宽松版)
 
+# ================= 股票池清洗配置 =================
+MIN_LISTING_DAYS = 60    # 上市不足60天的新股剔除
+EXCLUDE_ST = True        # 剔除ST股票
+
 # ================= 因子模板库 =================
 class FactorFactory:
     """因子生成工厂"""
@@ -233,7 +237,7 @@ class ICIROrthogonalAnalyzer:
         self.panel_df = None
     
     def load_data(self) -> bool:
-        """加载面板数据"""
+        """加载面板数据 (含股票池清洗)"""
         import glob
         
         all_files = glob.glob(os.path.join(self.data_dir, "*.csv"))
@@ -244,16 +248,39 @@ class ICIROrthogonalAnalyzer:
         print(f"📂 加载 {len(all_files)} 只股票数据...")
         
         df_list = []
+        skipped = 0
+        
         for file in all_files:
             symbol = os.path.basename(file).split('.')[0]
             df = pd.read_csv(file, parse_dates=['date'])
             df['symbol'] = symbol
+            
+            # 🔑 关键修复: 股票池清洗
+            # 1. 剔除上市不足60天的新股
+            if len(df) < MIN_LISTING_DAYS:
+                skipped += 1
+                continue
+            
+            # 2. 剔除ST股票
+            if EXCLUDE_ST and 'ST' in symbol.upper():
+                skipped += 1
+                continue
+            
+            # 3. 剔除数据缺失严重的股票
+            if df['close'].isna().sum() > len(df) * 0.1:
+                skipped += 1
+                continue
+            
             df_list.append(df)
+        
+        if not df_list:
+            print(f"❌ 清洗后无有效股票")
+            return False
         
         self.panel_df = pd.concat(df_list, ignore_index=True)
         self.panel_df = self.panel_df.sort_values(by=['date', 'symbol'])
         
-        print(f"✅ 加载完成: {len(self.panel_df['symbol'].unique())} 只股票, {len(self.panel_df)} 条记录")
+        print(f"✅ 加载完成: {len(self.panel_df['symbol'].unique())} 只股票, {len(self.panel_df)} 条记录 (剔除{skipped}只)")
         return True
     
     def calculate_forward_return(self, forward_period: int = 5) -> pd.DataFrame:
@@ -360,6 +387,9 @@ class ICIROrthogonalAnalyzer:
             return None
         
         factor_series = pd.concat(factor_list)['factor']
+        
+        # 🔑 关键修复: 清洗inf和nan (避免除零和极值破坏IC计算)
+        factor_series = factor_series.replace([np.inf, -np.inf], np.nan).dropna()
         
         # 计算未来收益
         forward_series = self.calculate_forward_return(forward_period)

@@ -62,6 +62,7 @@ AFTERNOON_END = (14, 57)
 GRAY_WEIGHT = 0.10        # 新策略只给10%仓位
 MIN_CAPITAL_PER_TRADE = 10000  # 单笔最小金额
 MAX_POSITIONS = 10        # 单策略最多持有10只股票 (硬性截断)
+MAX_HOLDING_DAYS = 5      # 最大持仓天数 (调仓周期)
 
 # ================= 全局状态 =================
 running = True
@@ -227,7 +228,7 @@ def save_portfolio():
 
 # ================= 交易执行 =================
 def execute_trade():
-    """执行交易 (使用批量价格获取)"""
+    """执行交易 (调仓逻辑: 先卖后买)"""
     if not daily_signals or not portfolio:
         return
     
@@ -243,13 +244,73 @@ def execute_trade():
                 all_long[symbol] = 0
             all_long[symbol] += weight
     
-    # 过滤已持仓股票
+    # ================= 阶段1: 调仓卖出 =================
+    # 找出需要卖出的股票
+    symbols_to_sell = []
+    for symbol in list(positions.keys()):
+        pos = positions[symbol]
+        
+        # 卖出条件1: 不在任何策略的看多名单中
+        if symbol not in all_long:
+            symbols_to_sell.append((symbol, "信号消失"))
+            continue
+        
+        # 卖出条件2: 持仓超过最大天数
+        buy_time = datetime.datetime.strptime(pos['buy_time'], '%Y-%m-%d %H:%M:%S')
+        holding_days = (datetime.datetime.now() - buy_time).days
+        if holding_days >= MAX_HOLDING_DAYS:
+            symbols_to_sell.append((symbol, f"持仓{holding_days}天到期"))
+            continue
+    
+    # 执行卖出
+    if symbols_to_sell:
+        sell_symbols = [s[0] for s in symbols_to_sell]
+        sell_prices = get_realtime_prices_batch(sell_symbols, batch_size=50)
+        
+        for symbol, reason in symbols_to_sell:
+            price = sell_prices.get(symbol)
+            if price is None or price < 0.01:
+                log(f"⚠️ {symbol} 无法获取价格，暂缓卖出")
+                continue
+            
+            pos = positions[symbol]
+            shares = pos['shares']
+            
+            # 计算卖出收入 (扣除印花税+佣金)
+            revenue = shares * price * (1 - 0.001 - 0.0003)
+            profit = revenue - pos['total_cost']
+            
+            # 记录交易
+            portfolio['trades'].append({
+                'type': 'sell',
+                'symbol': symbol,
+                'price': price,
+                'shares': shares,
+                'revenue': revenue,
+                'profit': profit,
+                'reason': reason,
+                'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'strategies': pos.get('strategies', [])
+            })
+            
+            # 更新资金
+            cash += revenue
+            del positions[symbol]
+            
+            status = "🔴" if profit < 0 else "🟢"
+            log(f"{status} 卖出 {symbol}: {shares}股 @ {price:.3f}元, 收益{profit:+.2f} ({reason})")
+    
+    # 更新组合现金
+    portfolio['cash'] = cash
+    
+    # ================= 阶段2: 调仓买入 =================
     to_buy = {s: w for s, w in all_long.items() if s not in positions}
     
     if not to_buy:
+        save_portfolio()
         return
     
-    # 🔑 关键修复: 批量获取价格 (避免API封禁)
+    # 批量获取价格
     symbols_to_buy = list(to_buy.keys())
     prices = get_realtime_prices_batch(symbols_to_buy, batch_size=50)
     
@@ -283,7 +344,7 @@ def execute_trade():
             'buy_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'strategies': [k for k, v in daily_signals.items() if symbol in v['long']]
         }
-        portfolio['cash'] -= cost
+        cash -= cost
         portfolio['trades'].append({
             'type': 'buy',
             'symbol': symbol,
@@ -295,6 +356,7 @@ def execute_trade():
         
         log(f"🟢 买入 {symbol}: {shares}股 @ {price:.3f}元, 成本{cost:.2f}")
     
+    portfolio['cash'] = cash
     save_portfolio()
 
 # ================= 性能追踪 (末位淘汰) =================
