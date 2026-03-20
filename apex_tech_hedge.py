@@ -173,11 +173,20 @@ def preload_history_to_queue(p):
         history = load_history_prices(sym, days=VOLATILITY_WINDOW + 10)
         
         if history:
+            # 历史数据用于波动率计算（需要60天日收益率）
+            if "history_prices" not in p:
+                p["history_prices"] = {}
+            p["history_prices"][sym] = history
+            
+            # 实时队列只需要最新价格
             if sym not in p["queues"]:
                 p["queues"][sym] = []
-            p["queues"][sym] = history[-MOMENTUM_WINDOW:] if len(history) > MOMENTUM_WINDOW else history
+            # 用最近的一个历史价格初始化实时队列
+            if history:
+                p["queues"][sym] = [history[-1]]
+            
             loaded += 1
-            log(f"📊 {sym} 预加载 {len(history)} 天历史数据")
+            log(f"📊 {sym} 预加载 {len(history)} 天历史数据用于波动率")
         else:
             log(f"⚠️ {sym} 无历史数据，将使用实时数据")
     
@@ -186,6 +195,29 @@ def preload_history_to_queue(p):
         log(f"✅ 历史数据预热完成，{loaded}/{len(all_syms)} 只标的")
     
     return p
+
+def get_volatility_data(p, symbol):
+    """
+    获取用于波动率计算的价格序列
+    优先使用历史日线数据，不足时用实时队列补齐
+    """
+    history = p.get("history_prices", {}).get(symbol, [])
+    
+    # 如果有完整的历史日线数据（>=60天），直接返回
+    if len(history) >= VOLATILITY_WINDOW:
+        return history
+    
+    # 历史数据不足，用实时队列补充
+    realtime = p.get("queues", {}).get(symbol, [])
+    
+    # 合并：历史日线 + 实时数据
+    combined = history + realtime
+    
+    # 确保有足够的数据点
+    if len(combined) < VOLATILITY_WINDOW:
+        return None  # 数据不足
+    
+    return combined[-VOLATILITY_WINDOW:]
 
 def signal_handler(signum, frame):
     global running
@@ -363,11 +395,14 @@ def scan_market():
     if not data: return
     alerts = []
 
-    # 1. 更新所有监控标的的价格队列
+    # 1. 更新实时价格队列（仅用于动量Z-score计算，5秒粒度）
     for sym, info in data.items():
         if sym not in p["queues"]: p["queues"][sym] = []
         p["queues"][sym].append(info["price"])
         if len(p["queues"][sym]) > MOMENTUM_WINDOW: p["queues"][sym].pop(0)
+    
+    # 2. 更新历史日线数据（仅用于波动率计算，不自动追加实时数据）
+    # 历史数据在启动时预热，之后只更新已有历史，不混入实时数据
 
     # 2. 遍历科技股，执行对冲策略
     for sym, name in TECH_SYMBOLS.items():
@@ -415,9 +450,17 @@ def scan_market():
 
         # ====== 买入逻辑 (低波蓄势 + 动量突破 + 动态 Beta 做空) ======
         else:
+            # 获取用于波动率计算的历史日线数据
+            vol_prices = get_volatility_data(p, sym)
+            
             # 多因子共振条件检查
             momentum_trigger = current_z > Z_BUY_THRESHOLD
-            is_low_vol, recent_vol = is_low_volatility(stock_q)
+            
+            # 使用历史日线数据计算波动率，而不是实时队列
+            if vol_prices and len(vol_prices) >= VOLATILITY_WINDOW:
+                is_low_vol, recent_vol = is_low_volatility(vol_prices)
+            else:
+                is_low_vol, recent_vol = False, float('inf')  # 数据不足时阻止买入
             
             # 双因子共振：动量突破 + 低波动蓄势
             if momentum_trigger and is_low_vol and p["cash"] > 20000:
