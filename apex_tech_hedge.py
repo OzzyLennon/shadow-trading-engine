@@ -369,18 +369,9 @@ def scan_market():
                                   f"🔴 做空: {bench_name} `{bench_shares}股`\n"
                                   f"📐 动态 Beta 配平: `β = {dyn_beta:.2f}`")
             
-            # 调试信息：动量触发但波动率过高 (加静默期防刷屏)
-            elif momentum_trigger and not is_low_vol and p["cash"] > 20000:
-                # 检查静默期
-                alert_key = f"{sym}_blocked"
-                now = time.time()
-                if alert_key in last_alert_time and now - last_alert_time[alert_key] < ALERT_COOLDOWN:
-                    pass  # 静默期内，不报警
-                else:
-                    last_alert_time[alert_key] = now
-                    alerts.append(f"⚠️ **动量突破被低波过滤拦截** (Z={current_z:.2f} > 1.5)\n"
-                                  f"🚫 近{VOLATILITY_WINDOW}个5秒波动率: `{recent_vol*100:.2f}%` > 3%\n"
-                                  f"📝 {name} 近期已炒作，等待回调蓄势")
+            # 动量触发但波动率过高 - 静默，不发送报警
+            # elif momentum_trigger and not is_low_vol and p["cash"] > 20000:
+            #     pass  # 不报警，避免刷屏
 
     if alerts: send_alert(alerts, p, data)
     save_portfolio(p)
