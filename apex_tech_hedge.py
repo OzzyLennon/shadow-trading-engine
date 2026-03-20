@@ -63,8 +63,67 @@ COMMISSION = 0.00025
 STAMP_DUTY = 0.001        # 印花税（仅卖出）
 SHORT_INTEREST = 0.0005   # 模拟做空的额外融券/期指升水成本
 
+# 静默期配置 (防止刷屏)
+ALERT_COOLDOWN = 300      # 同一股票同一状态，5分钟内不重复报警
+HISTORY_DATA_DIR = os.path.join(SCRIPT_DIR, "research", "data")
+
 running = True
 prev_prices = {}
+last_alert_time = {}       # 上次报警时间
+
+# ================= 加载历史数据预热 =================
+def load_history_prices(symbol, days=60):
+    """
+    从CSV加载历史收盘价用于波动率计算
+    """
+    csv_path = os.path.join(HISTORY_DATA_DIR, f"{symbol}_daily.csv")
+    if not os.path.exists(csv_path):
+        return []
+    
+    try:
+        with open(csv_path, 'r') as f:
+            lines = f.readlines()
+        
+        # 跳过表头，读取最近N天的收盘价
+        prices = []
+        for line in reversed(lines[1:]):  # 从最新往前读
+            parts = line.strip().split(',')
+            if len(parts) >= 5:
+                try:
+                    close = float(parts[4])  # close列
+                    prices.append(close)
+                    if len(prices) >= days:
+                        break
+                except:
+                    continue
+        
+        return list(reversed(prices))  # 恢复时间顺序（旧->新）
+    except Exception as e:
+        log(f"⚠️ 加载历史数据失败 {symbol}: {e}")
+        return []
+
+def preload_history_to_queue(p):
+    """
+    启动时预热队列，填充历史收盘价
+    """
+    all_syms = list(TECH_SYMBOLS.keys()) + list(BENCHMARKS.keys())
+    loaded = 0
+    
+    for sym in all_syms:
+        history = load_history_prices(sym, days=VOLATILITY_WINDOW + 10)  # 多加载一点
+        if history:
+            if sym not in p["queues"]:
+                p["queues"][sym] = []
+            # 用历史数据填充队列（保留已有的实时数据）
+            p["queues"][sym] = history[-MOMENTUM_WINDOW:] if len(history) > MOMENTUM_WINDOW else history
+            loaded += 1
+            log(f"📊 {sym} 预加载 {len(history)} 天历史数据")
+    
+    if loaded > 0:
+        save_portfolio(p)
+        log(f"✅ 历史数据预热完成，{loaded} 只标的")
+    
+    return p
 
 def signal_handler(signum, frame):
     global running
@@ -335,11 +394,18 @@ def scan_market():
                                   f"🔴 做空: {bench_name} `{bench_shares}股`\n"
                                   f"📐 动态 Beta 配平: `β = {dyn_beta:.2f}`")
             
-            # 调试信息：动量触发但波动率过高，记录过滤日志
+            # 调试信息：动量触发但波动率过高 (加静默期防刷屏)
             elif momentum_trigger and not is_low_vol and p["cash"] > 20000:
-                alerts.append(f"⚠️ **动量突破被低波过滤拦截** (Z={current_z:.2f} > 1.5)\n"
-                              f"🚫 近期{VOLATILITY_WINDOW}日波动率: `{recent_vol*100:.2f}%` > 3%\n"
-                              f"📝 {name} 近期已炒作，等待回调蓄势")
+                # 检查静默期
+                alert_key = f"{sym}_blocked"
+                now = time.time()
+                if alert_key in last_alert_time and now - last_alert_time[alert_key] < ALERT_COOLDOWN:
+                    pass  # 静默期内，不报警
+                else:
+                    last_alert_time[alert_key] = now
+                    alerts.append(f"⚠️ **动量突破被低波过滤拦截** (Z={current_z:.2f} > 1.5)\n"
+                                  f"🚫 近期{VOLATILITY_WINDOW}日波动率: `{recent_vol*100:.2f}%` > 3%\n"
+                                  f"📝 {name} 近期已炒作，等待回调蓄势")
 
     if alerts: send_alert(alerts, p, data)
     save_portfolio(p)
@@ -353,6 +419,11 @@ def main():
     log(f"🎯 策略: 低波蓄势(60日<3%) + 动量突破 Z>{Z_BUY_THRESHOLD} | 动态 Beta 风险中性")
     log(f"🛡️ 空头基准: {', '.join(BENCHMARKS.values())}")
     log("="*50)
+
+    # 预热：从CSV加载历史数据填充队列
+    p = load_portfolio()
+    p = preload_history_to_queue(p)
+    save_portfolio(p)
 
     while running:
         try:
