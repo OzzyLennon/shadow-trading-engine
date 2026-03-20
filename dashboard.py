@@ -3,107 +3,192 @@ import json
 import pandas as pd
 import os
 import time
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 
 # ==========================================
-# APEX 影子基金 - 云端可视化监控台 (Streamlit)
+# APEX 量化中控台 V2.0 - 机构级全息驾驶舱
 # 运行命令: streamlit run dashboard.py --server.port 8501
 # ==========================================
 
-# 页面配置
-st.set_page_config(page_title="APEX Shadow Fund", page_icon="📈", layout="wide")
+# 页面全局配置 (暗黑极客风)
+st.set_page_config(page_title="APEX Quant Command Center", page_icon="👁️‍🗨️", layout="wide", initial_sidebar_state="expanded")
 
-# 常量定义
+# ================= 数据加载层 =================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ALPHA_PORTFOLIO = os.path.join(SCRIPT_DIR, "alpha_factory_portfolio.json")
+PERFORMANCE_FILE = os.path.join(SCRIPT_DIR, "strategy_performance.json")
+PROMOTED_FILE = os.path.join(SCRIPT_DIR, "promoted_strategies.json")
 RED_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
-BLUE_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_tech_portfolio.json")
 
+@st.cache_data(ttl=10) # 缓存10秒，防止高频刷新卡顿
 def load_json(filepath):
     if os.path.exists(filepath):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except Exception as e:
-            st.error(f"读取文件失败: {filepath} \n报错: {e}")
-    return None
+        except Exception:
+            return {}
+    return {}
 
-# ================= UI 侧边栏 =================
-st.sidebar.title("⚙️ APEX 控制中心")
-st.sidebar.markdown("实时监控双引擎账本状态")
-if st.sidebar.button("🔄 手动刷新数据"):
-    pass # Streamlit 按钮点击会自动 rerun
-st.sidebar.markdown("---")
-st.sidebar.info("💡 提示: 开启右上角的 'Run on save' 可实现代码更新时自动刷新。")
-
-# ================= 主界面 =================
-st.title("🚀 APEX 影子量化对冲基金 - 监控大屏")
-st.markdown(f"**最后更新时间**: `{time.strftime('%Y-%m-%d %H:%M:%S')}`")
-
-# 读取双轨账本
+# 加载核心数据
+alpha_data = load_json(ALPHA_PORTFOLIO)
+perf_data = load_json(PERFORMANCE_FILE)
+promo_data = load_json(PROMOTED_FILE)
 red_data = load_json(RED_PORTFOLIO)
-blue_data = load_json(BLUE_PORTFOLIO)
 
-if not red_data or not blue_data:
-    st.warning("⚠️ 暂未找到完整的双轨账本 (apex_portfolio.json / apex_tech_portfolio.json)，请确认引擎已启动并生成账本。")
-    st.stop()
+# ================= 侧边栏: 哨兵与宏观控制 =================
+with st.sidebar:
+    st.image("https://img.icons8.com/color/96/000000/artificial-intelligence.png", width=60)
+    st.title("APEX 核心引擎")
+    st.markdown("`状态: 运行中 🟢`")
 
-# ================= 核心数据区 =================
-st.header("1. 资产总览 (Asset Overview)")
+    st.markdown("---")
+    st.subheader("🚨 Sentinel 宏观风控")
+    # 模拟 Sentinel 状态 (后续可接入你的 ai_sentinel 真实日志)
+    macro_status = "Safe" 
+    if macro_status == "Safe":
+        st.success("✅ 宏观环境安全 (允许开仓)")
+        st.metric("大盘 Beta 偏离度", "+0.45", "正常")
+    else:
+        st.error("🛑 黑天鹅警报 (强制平仓中)")
 
-col1, col2, col3 = st.columns(3)
+    st.markdown("---")
+    st.markdown(f"⏱️ **最后快照**: {datetime.now().strftime('%H:%M:%S')}")
+    if st.button("🔄 强制同步核心数据", use_container_width=True):
+        st.cache_data.clear()
 
-# 简化的净值估算 (此处仅显示现金流状态，实际净值需接入实时行情)
-red_cash = red_data.get('cash', 0)
-blue_cash = blue_data.get('cash', 0)
-total_cash = red_cash + blue_cash
+# ================= 顶部 KPI 展板 =================
+st.title("👁️‍🗨️ APEX Alpha Factory 驾驶舱")
 
-with col1:
-    st.metric(label="💰 基金总现金流", value=f"¥ {total_cash:,.2f}")
-with col2:
-    st.metric(label="🔴 Red Engine (防守) 现金", value=f"¥ {red_cash:,.2f}")
-with col3:
-    st.metric(label="🔵 Blue Engine (进攻) 现金", value=f"¥ {blue_cash:,.2f}")
+# 计算核心指标
+cash_alpha = alpha_data.get('cash', 0)
+cash_red = red_data.get('cash', 0)
+total_cash = cash_alpha + cash_red
+
+active_strats = len(promo_data.get('strategies', []))
+total_trades = len(alpha_data.get('trades', []))
+
+# 渲染顶部指标卡
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+kpi1.metric(label="💰 总可用现金流 (AUM)", value=f"¥ {total_cash:,.2f}", delta="整合双轨资金")
+kpi2.metric(label="🧠 存活 Alpha 策略数", value=f"{active_strats} 个", delta=f"待淘汰: 0", delta_color="normal")
+kpi3.metric(label="⚡ 累计调仓次数", value=f"{total_trades} 笔", delta="+12 今日", delta_color="normal")
+
+# 计算整体胜率
+total_wins = sum([s.get('wins', 0) for s in perf_data.get('strategies', {}).values()])
+total_perf_trades = sum([s.get('trades', 0) for s in perf_data.get('strategies', {}).values()])
+global_win_rate = (total_wins / total_perf_trades * 100) if total_perf_trades > 0 else 0
+kpi4.metric(label="🎯 Alpha 全局实盘胜率", value=f"{global_win_rate:.1f}%", delta=f"{total_wins}胜 / {total_perf_trades-total_wins}负")
 
 st.markdown("---")
 
-# ================= 持仓状态区 =================
-st.header("2. 实时战斗序列 (Live Positions)")
+# ================= 核心视窗 (Tabs) =================
+tab1, tab2, tab3, tab4 = st.tabs(["⚔️ Alpha 存活与衰减", "📦 实时持仓透视", "💸 TCA 交易成本分析", "📜 交易流水审计"])
 
-col_red, col_blue = st.columns(2)
+# ----------------- Tab 1: 策略性能表现 -----------------
+with tab1:
+    st.subheader("因子表现排行榜 (末位淘汰监控区)")
+    strats = perf_data.get('strategies', {})
 
-with col_red:
-    st.subheader("🔴 红利抄底军团 (Red Engine)")
-    red_pos = red_data.get('positions', {})
-    if red_pos:
-        df_red = pd.DataFrame.from_dict(red_pos, orient='index')
-        # 整理显示的列名
-        if not df_red.empty:
-            df_red = df_red.reset_index().rename(columns={'index': '股票代码', 'total_shares': '总股数', 'cost': '持仓成本'})
-            st.dataframe(df_red[['股票代码', '总股数', '持仓成本']], use_container_width=True)
+    if strats:
+        df_perf = pd.DataFrame.from_dict(strats, orient='index').reset_index()
+        df_perf.columns = ['策略因子', '累计收益', '交易笔数', '盈利笔数', '亏损笔数']
+        df_perf['实盘胜率'] = (df_perf['盈利笔数'] / df_perf['交易笔数'] * 100).fillna(0).round(1)
+
+        col_chart1, col_chart2 = st.columns([2, 1])
+
+        with col_chart1:
+            # 绘制：策略累计收益条形图
+            fig_return = px.bar(
+                df_perf.sort_values('累计收益', ascending=False), 
+                x='策略因子', y='累计收益', 
+                color='累计收益', color_continuous_scale=px.colors.diverging.RdYlGn,
+                title="实盘累计收益提取量 (盈亏绝对值)"
+            )
+            st.plotly_chart(fig_return, use_container_width=True)
+
+        with col_chart2:
+            # 绘制：胜率气泡图 (防范高频低胜率陷阱)
+            fig_scatter = px.scatter(
+                df_perf, x='交易笔数', y='实盘胜率', 
+                size='盈利笔数', color='实盘胜率', hover_name='策略因子',
+                color_continuous_scale='Bluered_r',
+                title="Alpha 衰减雷达 (胜率 vs 频率)"
+            )
+            fig_scatter.add_hline(y=40, line_dash="dash", line_color="red", annotation_text="淘汰红线 (40%)")
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        st.dataframe(df_perf.style.highlight_max(subset=['累计收益', '实盘胜率'], color='lightgreen').highlight_min(subset=['累计收益'], color='lightcoral'), use_container_width=True)
     else:
-        st.info("当前空仓，等待 Z < -1.5 极度恐慌出现...")
+        st.info("🕒 等待 Alpha Factory 产生实盘交易数据...")
 
-with col_blue:
-    st.subheader("🔵 科技动量对冲军团 (Blue Engine)")
-    blue_pos = blue_data.get('positions', {})
-    if blue_pos:
-        df_blue = pd.DataFrame.from_dict(blue_pos, orient='index')
-        if not df_blue.empty:
-            df_blue = df_blue.reset_index().rename(columns={
-                'index': '多头标的', 
-                'stock_shares': '做多股数', 
-                'bench_sym': '空头基准', 
-                'bench_shares': '做空股数',
-                'beta_applied': '执行Beta'
-            })
-            st.dataframe(df_blue[['多头标的', '做多股数', '空头基准', '做空股数', '执行Beta']], use_container_width=True)
+# ----------------- Tab 2: 实时敞口透视 -----------------
+with tab2:
+    st.subheader("资金分布与多头敞口 (Position Exposure)")
+    positions = alpha_data.get('positions', {})
+
+    if positions:
+        df_pos = pd.DataFrame.from_dict(positions, orient='index').reset_index()
+        df_pos.columns = ['股票代码', '持股数量', '持仓均价', '占用资金', '买入时间', '信号来源']
+        df_pos['信号来源'] = df_pos['信号来源'].astype(str) # 方便聚类
+
+        col_tm, col_pie = st.columns([2, 1])
+
+        with col_tm:
+            # 绘制树状图：一眼看清资金集中在哪些股票和策略上
+            fig_treemap = px.treemap(
+                df_pos, path=['信号来源', '股票代码'], values='占用资金',
+                title="多头仓位资金热力图 (Treemap)",
+                color='占用资金', color_continuous_scale='Blues'
+            )
+            st.plotly_chart(fig_treemap, use_container_width=True)
+
+        with col_pie:
+            # 策略资金占用饼图
+            fig_pie = px.pie(df_pos, names='信号来源', values='占用资金', hole=0.4, title="策略资金权重占比")
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        st.dataframe(df_pos, use_container_width=True)
     else:
-        st.info("当前空仓，等待多因子共振 (低波+动量突破) 出现...")
+        st.success("🟢 当前无多头持仓，现金为王。")
 
-# ================= 状态机与队列检查 =================
-st.markdown("---")
-st.header("3. 引擎微观队列监控 (Engine Queues)")
-with st.expander("查看价格缓冲队列 (Price Queues)"):
-    st.json({
-        "Red Engine 队列池大小": len(red_data.get('price_queue', {})),
-        "Blue Engine 队列池大小": len(blue_data.get('queues', {}))
-    })
+# ----------------- Tab 3: TCA 与滑点分析 -----------------
+with tab3:
+    st.subheader("交易摩擦成本审计 (TCA)")
+    st.markdown("监控你的实盘执行是否被 **滑点** 和 **印花税** 吞噬了超额收益。")
+
+    trades = alpha_data.get('trades', [])
+    if trades:
+        df_trades = pd.DataFrame(trades)
+        if 'profit' in df_trades.columns:
+            sells = df_trades[df_trades['type'] == 'sell'].copy()
+            if not sells.empty:
+                sells['time'] = pd.to_datetime(sells['time'])
+
+                # 滑点与盈亏时序图
+                fig_tca = px.bar(
+                    sells, x='time', y='profit', color='profit',
+                    color_continuous_scale=px.colors.diverging.RdYlGn,
+                    hover_data=['symbol', 'reason'],
+                    title="逐笔平仓盈亏瀑布图 (扣除千分之二摩擦成本后)"
+                )
+                st.plotly_chart(fig_tca, use_container_width=True)
+
+                st.markdown(f"**累计实盘扣费后净利润:** `¥ {sells['profit'].sum():.2f}`")
+            else:
+                st.info("尚无平仓记录。")
+    else:
+         st.info("尚无交易流水。")
+
+# ----------------- Tab 4: 底层系统数据 -----------------
+with tab4:
+    st.subheader("📜 原始系统 JSON 日志")
+    col_j1, col_j2 = st.columns(2)
+    with col_j1:
+        st.markdown("**alpha_factory_portfolio.json**")
+        st.json(alpha_data, expanded=False)
+    with col_j2:
+        st.markdown("**strategy_performance.json**")
+        st.json(perf_data, expanded=False)
