@@ -174,6 +174,10 @@ total_aum = total_cash + position_value
 total_profit = position_value - position_cost
 total_profit_pct = (total_profit / position_cost * 100) if position_cost > 0 else 0
 
+# 总收益率计算 (与收盘汇报一致)
+INITIAL_CAPITAL = 2000000  # Red Engine 100万 + Blue Engine 100万
+total_return = (total_aum - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+
 active_strats = len(promo_data.get('strategies', []))
 total_trades_alpha = len(alpha_data.get('trades', []))
 total_trades_red = len(red_data.get('trades', []))
@@ -183,7 +187,7 @@ total_trades = total_trades_alpha + total_trades_red
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 kpi1.metric(label="💰 总资产净值 (AUM)", value=f"¥ {total_aum:,.0f}", delta=f"现金 {total_cash:,.0f}")
 kpi2.metric(label="📊 持仓市值", value=f"¥ {position_value:,.0f}", delta=f"成本 {position_cost:,.0f}")
-kpi3.metric(label="📈 持仓盈亏", value=f"¥ {total_profit:,.0f}", delta=f"{total_profit_pct:+.2f}%")
+kpi3.metric(label="📈 总收益率", value=f"{total_return:+.2f}%", delta=f"持仓盈亏 ¥{total_profit:,.0f}")
 kpi4.metric(label="🧠 存活 Alpha 策略", value=f"{active_strats} 个")
 kpi5.metric(label="⚡ 累计调仓", value=f"{total_trades} 笔")
 
