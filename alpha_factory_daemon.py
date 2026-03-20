@@ -14,7 +14,6 @@ Alpha Factory 策略执行引擎 - 第三阶段
 日期: 2026-03-20
 """
 
-import requests
 import json
 import datetime
 import os
@@ -24,6 +23,9 @@ import signal
 import sys
 import glob
 import pandas as pd
+
+# 导入因子库 (DRY原则)
+from factor_lib import calculate_factor, get_realtime_prices_batch
 
 # ================= 加载环境变量 =================
 def load_env():
@@ -59,6 +61,7 @@ AFTERNOON_END = (14, 57)
 # 灰度配置
 GRAY_WEIGHT = 0.10        # 新策略只给10%仓位
 MIN_CAPITAL_PER_TRADE = 10000  # 单笔最小金额
+MAX_POSITIONS = 10        # 单策略最多持有10只股票 (硬性截断)
 
 # ================= 全局状态 =================
 running = True
@@ -137,29 +140,8 @@ def load_stock_pool():
     stock_pool = [os.path.basename(f).split('.')[0] for f in files]
     log(f"📊 股票池: {len(stock_pool)} 只")
 
-# ================= 因子计算 =================
-def calculate_factor(stock_df, factor_name, signal_type, period):
-    """计算因子值"""
-    close = stock_df['close']
-    volume = stock_df['volume']
-    
-    if 'volatility' in factor_name:
-        return close.pct_change().rolling(period).std()
-    elif 'ATR' in factor_name:
-        high = stock_df['high']
-        low = stock_df['low']
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(period).mean()
-    elif 'volume_ma' in factor_name:
-        return volume.rolling(period).mean()
-    
-    return None
-
 def generate_signals():
-    """生成交易信号"""
+    """生成交易信号 (使用绝对数量截断)"""
     global daily_signals
     
     if not strategies or not stock_pool:
@@ -181,11 +163,11 @@ def generate_signals():
                 continue
             
             try:
-                import pandas as pd
                 stock_df = pd.read_csv(file_path, parse_dates=['date'])
                 stock_df = stock_df.sort_values('date')
                 
-                factor_series = calculate_factor(stock_df, factor_name, signal_type, period)
+                # 使用factor_lib统一计算
+                factor_series = calculate_factor(stock_df, factor_name)
                 if factor_series is not None and len(factor_series) > 0:
                     last_val = factor_series.iloc[-1]
                     if pd.notna(last_val):
@@ -193,23 +175,22 @@ def generate_signals():
             except Exception as e:
                 continue
         
-        if len(factor_values) < 10:
+        if len(factor_values) < MAX_POSITIONS:
             continue
         
-        # 分组排序
+        # 排序后取绝对数量 (硬性截断，避免过度分散)
         sorted_stocks = sorted(factor_values.items(), key=lambda x: x[1])
-        n = len(sorted_stocks)
         
         if signal_type == "high_volume_ma":
-            # 高因子组 = 做多
-            top_stocks = sorted_stocks[-n//3:]
+            # 高因子组 = 做多，取前MAX_POSITIONS只
+            top_stocks = sorted_stocks[-MAX_POSITIONS:]
             daily_signals[factor_name] = {
                 'long': [s[0] for s in top_stocks],
                 'factor_values': {s[0]: s[1] for s in top_stocks}
             }
         elif signal_type in ["low_vol", "low_atr"]:
-            # 低因子组 = 做多
-            bottom_stocks = sorted_stocks[:n//3]
+            # 低因子组 = 做多，取前MAX_POSITIONS只
+            bottom_stocks = sorted_stocks[:MAX_POSITIONS]
             daily_signals[factor_name] = {
                 'long': [s[0] for s in bottom_stocks],
                 'factor_values': {s[0]: s[1] for s in bottom_stocks}
@@ -219,37 +200,6 @@ def generate_signals():
     log(f"📡 信号生成完成: {len(daily_signals)} 个策略有信号")
     for factor_name, sig in daily_signals.items():
         log(f"   {factor_name}: {len(sig['long'])} 只股票看多")
-
-# ================= 实时价格获取 =================
-def get_realtime_price(symbol):
-    """获取实时价格"""
-    try:
-        # 转换代码格式
-        if symbol.startswith('sh'):
-            code = symbol[2:]
-            market = 'sh'
-        elif symbol.startswith('sz'):
-            code = symbol[2:]
-            market = 'sz'
-        else:
-            return None
-        
-        url = f"http://hq.sinajs.cn/list={market}{code}"
-        headers = {'Referer': 'http://finance.sina.com.cn'}
-        res = requests.get(url, headers=headers, timeout=5)
-        res.encoding = 'gbk'
-        
-        data = res.text.split('"')[1].split(',')
-        if len(data) < 30:
-            return None
-        
-        price = float(data[3])
-        if price <= 0:
-            price = float(data[2])  # 用昨收
-        
-        return price
-    except:
-        return None
 
 # ================= 组合管理 =================
 def load_portfolio():
@@ -277,7 +227,7 @@ def save_portfolio():
 
 # ================= 交易执行 =================
 def execute_trade():
-    """执行交易"""
+    """执行交易 (使用批量价格获取)"""
     if not daily_signals or not portfolio:
         return
     
@@ -293,12 +243,21 @@ def execute_trade():
                 all_long[symbol] = 0
             all_long[symbol] += weight
     
+    # 过滤已持仓股票
+    to_buy = {s: w for s, w in all_long.items() if s not in positions}
+    
+    if not to_buy:
+        return
+    
+    # 🔑 关键修复: 批量获取价格 (避免API封禁)
+    symbols_to_buy = list(to_buy.keys())
+    prices = get_realtime_prices_batch(symbols_to_buy, batch_size=50)
+    
+    log(f"📡 批量获取 {len(symbols_to_buy)} 只股票价格, 成功 {len(prices)} 只")
+    
     # 执行买入
-    for symbol, total_weight in sorted(all_long.items(), key=lambda x: -x[1]):
-        if symbol in positions:
-            continue  # 已持仓
-        
-        price = get_realtime_price(symbol)
+    for symbol, total_weight in sorted(to_buy.items(), key=lambda x: -x[1]):
+        price = prices.get(symbol)
         if price is None or price < 1:
             continue
         
