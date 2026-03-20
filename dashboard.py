@@ -6,6 +6,7 @@ import time
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
+import requests
 
 # ==========================================
 # APEX 量化中控台 V2.0 - 机构级全息驾驶舱
@@ -32,11 +33,80 @@ def load_json(filepath):
             return {}
     return {}
 
+# 实时价格获取
+@st.cache_data(ttl=5)
+def get_realtime_prices(symbols):
+    """批量获取实时价格"""
+    if not symbols:
+        return {}
+    
+    codes = []
+    for s in symbols:
+        if s.startswith('sh'):
+            codes.append(f"sh{s[2:]}")
+        elif s.startswith('sz'):
+            codes.append(f"sz{s[2:]}")
+    
+    prices = {}
+    url = f"http://hq.sinajs.cn/list={','.join(codes)}"
+    headers = {'Referer': 'http://finance.sina.com.cn'}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.encoding = 'gbk'
+        
+        for line in res.text.split('\n'):
+            if 'hq_str_' not in line or '=' not in line:
+                continue
+            
+            code_part = line.split('=')[0].split('_')[-1]
+            data_part = line.split('"')[1] if '"' in line else ''
+            
+            if not data_part:
+                continue
+            
+            fields = data_part.split(',')
+            if len(fields) < 31:
+                continue
+            
+            try:
+                price = float(fields[3])  # 当前价
+                if price <= 0:
+                    price = float(fields[2])  # 昨收
+                
+                # 恢复代码格式
+                if code_part.startswith('sh'):
+                    symbol = f"sh{code_part[2:]}"
+                elif code_part.startswith('sz'):
+                    symbol = f"sz{code_part[2:]}"
+                else:
+                    symbol = code_part
+                
+                prices[symbol] = {
+                    'current': price,
+                    'open': float(fields[1]) if fields[1] else price,
+                    'high': float(fields[4]) if fields[4] else price,
+                    'low': float(fields[5]) if fields[5] else price,
+                    'volume': int(fields[8]) if fields[8] else 0,
+                    'change_pct': (price - float(fields[2])) / float(fields[2]) * 100 if float(fields[2]) > 0 else 0
+                }
+            except:
+                continue
+    except Exception as e:
+        st.warning(f"获取实时行情失败: {e}")
+    
+    return prices
+
 # 加载核心数据
 alpha_data = load_json(ALPHA_PORTFOLIO)
 perf_data = load_json(PERFORMANCE_FILE)
 promo_data = load_json(PROMOTED_FILE)
 red_data = load_json(RED_PORTFOLIO)
+
+# 获取所有持仓的实时价格
+all_symbols = set(red_data.get('positions', {}).keys())
+all_symbols.update(alpha_data.get('positions', {}).keys())
+realtime_prices = get_realtime_prices(list(all_symbols)) if all_symbols else {}
 
 # ================= 侧边栏: 哨兵与宏观控制 =================
 with st.sidebar:
@@ -67,14 +137,39 @@ cash_alpha = alpha_data.get('cash', 0)
 cash_red = red_data.get('cash', 0)
 total_cash = cash_alpha + cash_red
 
+# 计算持仓市值和盈亏
+position_value = 0
+position_cost = 0
+for symbol, pos in red_data.get('positions', {}).items():
+    shares = pos.get('total_shares', 0)
+    cost = pos.get('cost', 0)
+    current_price = realtime_prices.get(symbol, {}).get('current', cost)
+    position_value += shares * current_price
+    position_cost += shares * cost
+
+for symbol, pos in alpha_data.get('positions', {}).items():
+    shares = pos.get('shares', 0)
+    cost = pos.get('cost_price', 0)
+    current_price = realtime_prices.get(symbol, {}).get('current', cost)
+    position_value += shares * current_price
+    position_cost += shares * cost
+
+total_aum = total_cash + position_value
+total_profit = position_value - position_cost
+total_profit_pct = (total_profit / position_cost * 100) if position_cost > 0 else 0
+
 active_strats = len(promo_data.get('strategies', []))
-total_trades = len(alpha_data.get('trades', []))
+total_trades_alpha = len(alpha_data.get('trades', []))
+total_trades_red = len(red_data.get('trades', []))
+total_trades = total_trades_alpha + total_trades_red
 
 # 渲染顶部指标卡
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric(label="💰 总可用现金流 (AUM)", value=f"¥ {total_cash:,.2f}", delta="整合双轨资金")
-kpi2.metric(label="🧠 存活 Alpha 策略数", value=f"{active_strats} 个", delta=f"待淘汰: 0", delta_color="normal")
-kpi3.metric(label="⚡ 累计调仓次数", value=f"{total_trades} 笔", delta="+12 今日", delta_color="normal")
+kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+kpi1.metric(label="💰 总资产净值 (AUM)", value=f"¥ {total_aum:,.0f}", delta=f"现金 {total_cash:,.0f}")
+kpi2.metric(label="📊 持仓市值", value=f"¥ {position_value:,.0f}", delta=f"成本 {position_cost:,.0f}")
+kpi3.metric(label="📈 持仓盈亏", value=f"¥ {total_profit:,.0f}", delta=f"{total_profit_pct:+.2f}%")
+kpi4.metric(label="🧠 存活 Alpha 策略", value=f"{active_strats} 个")
+kpi5.metric(label="⚡ 累计调仓", value=f"{total_trades} 笔")
 
 # 计算整体胜率
 total_wins = sum([s.get('wins', 0) for s in perf_data.get('strategies', {}).values()])
@@ -127,30 +222,106 @@ with tab1:
 # ----------------- Tab 2: 实时敞口透视 -----------------
 with tab2:
     st.subheader("资金分布与多头敞口 (Position Exposure)")
+    
+    # 合并 Alpha Factory 和 APEX 的持仓
     positions = alpha_data.get('positions', {})
+    red_positions = red_data.get('positions', {})
+    
+    # APEX持仓转换为统一格式
+    all_positions = {}
+    total_value = 0
+    total_cost = 0
+    
+    # Alpha Factory 持仓
+    for symbol, pos in positions.items():
+        shares = pos.get('shares', 0)
+        cost_price = pos.get('cost_price', 0)
+        total_cost_pos = pos.get('total_cost', 0)
+        
+        current_price = realtime_prices.get(symbol, {}).get('current', cost_price)
+        current_value = shares * current_price
+        profit = current_value - total_cost_pos
+        profit_pct = (profit / total_cost_pos * 100) if total_cost_pos > 0 else 0
+        
+        all_positions[symbol] = {
+            '持股数量': shares,
+            '持仓均价': cost_price,
+            '当前价格': current_price,
+            '当前市值': current_value,
+            '占用资金': total_cost_pos,
+            '盈亏金额': profit,
+            '盈亏比例': profit_pct,
+            '买入时间': pos.get('buy_time', ''),
+            '信号来源': 'Alpha Factory',
+            '引擎': 'Alpha Factory'
+        }
+        total_value += current_value
+        total_cost += total_cost_pos
+    
+    # APEX 持仓
+    for symbol, pos in red_positions.items():
+        shares = pos.get('total_shares', 0)
+        cost_price = pos.get('cost', 0)
+        total_cost_pos = shares * cost_price
+        
+        current_price = realtime_prices.get(symbol, {}).get('current', cost_price)
+        current_value = shares * current_price
+        profit = current_value - total_cost_pos
+        profit_pct = (profit / total_cost_pos * 100) if total_cost_pos > 0 else 0
+        
+        all_positions[symbol] = {
+            '持股数量': shares,
+            '持仓均价': cost_price,
+            '当前价格': current_price,
+            '当前市值': current_value,
+            '占用资金': total_cost_pos,
+            '盈亏金额': profit,
+            '盈亏比例': profit_pct,
+            '买入时间': '历史持仓',
+            '信号来源': 'APEX V5.0 (煤电红利)',
+            '引擎': 'APEX V5.0'
+        }
+        total_value += current_value
+        total_cost += total_cost_pos
 
-    if positions:
-        df_pos = pd.DataFrame.from_dict(positions, orient='index').reset_index()
-        df_pos.columns = ['股票代码', '持股数量', '持仓均价', '占用资金', '买入时间', '信号来源']
-        df_pos['信号来源'] = df_pos['信号来源'].astype(str) # 方便聚类
+    if all_positions:
+        df_pos = pd.DataFrame.from_dict(all_positions, orient='index').reset_index()
+        df_pos.columns = ['股票代码', '持股数量', '持仓均价', '当前价格', '当前市值', '占用资金', '盈亏金额', '盈亏比例', '买入时间', '信号来源', '引擎']
+        
+        # 汇总行
+        total_profit = df_pos['盈亏金额'].sum()
+        total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0
+        
+        st.markdown(f"**📊 持仓汇总**: 总市值 `¥{total_value:,.2f}` | 总成本 `¥{total_cost:,.2f}` | 总盈亏 `{'🟢' if total_profit >= 0 else '🔴'} ¥{total_profit:,.2f}` ({total_profit_pct:+.2f}%)")
 
         col_tm, col_pie = st.columns([2, 1])
 
         with col_tm:
-            # 绘制树状图：一眼看清资金集中在哪些股票和策略上
+            # 绘制树状图
             fig_treemap = px.treemap(
-                df_pos, path=['信号来源', '股票代码'], values='占用资金',
+                df_pos, path=['引擎', '股票代码'], values='当前市值',
                 title="多头仓位资金热力图 (Treemap)",
-                color='占用资金', color_continuous_scale='Blues'
+                color='当前市值', color_continuous_scale='Blues'
             )
             st.plotly_chart(fig_treemap, use_container_width=True)
 
         with col_pie:
-            # 策略资金占用饼图
-            fig_pie = px.pie(df_pos, names='信号来源', values='占用资金', hole=0.4, title="策略资金权重占比")
+            # 引擎资金占用饼图
+            fig_pie = px.pie(df_pos, names='引擎', values='当前市值', hole=0.4, title="引擎资金权重占比")
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        st.dataframe(df_pos, use_container_width=True)
+        # 持仓明细表格（带颜色）
+        def color_profit(val):
+            if isinstance(val, (int, float)):
+                color = 'lightgreen' if val >= 0 else 'lightcoral'
+                return f'background-color: {color}'
+            return ''
+        
+        st.dataframe(
+            df_pos.style.applymap(color_profit, subset=['盈亏金额', '盈亏比例'])
+            .format({'持仓均价': '¥{:.3f}', '当前价格': '¥{:.3f}', '当前市值': '¥{:,.2f}', '占用资金': '¥{:,.2f}', '盈亏金额': '¥{:+,.2f}', '盈亏比例': '{:+.2f}%'}),
+            use_container_width=True
+        )
     else:
         st.success("🟢 当前无多头持仓，现金为王。")
 
