@@ -73,7 +73,7 @@ last_alert_time = {}       # 上次报警时间
 # ================= 预热期配置 =================
 # 每天首次启动需要5分钟预热 (60个点 * 5秒 = 300秒)
 WARMUP_POINTS = VOLATILITY_WINDOW  # 60个点
-WARMUP_LOGGED = False  # 预热完成标志
+warmup_complete = False  # 预热完成标志（全局变量）
 
 def signal_handler(signum, frame):
     global running
@@ -252,7 +252,7 @@ def scan_market():
     alerts = []
 
     # 1. 更新所有监控标的的价格队列 (收集60个5秒数据点，约5分钟)
-    global WARMUP_LOGGED
+    global warmup_complete
     warmup_ready = True
     min_queue_len = float('inf')
     
@@ -264,12 +264,14 @@ def scan_market():
     
     # 预热期检查
     if min_queue_len < WARMUP_POINTS:
-        warmup_ready = False
-        if not WARMUP_LOGGED:
-            log(f"⏳ 引擎预热中... 已收集 {min_queue_len}/{WARMUP_POINTS} 个数据点 (约{min_queue_len * POLL_INTERVAL}秒)，剩余约{(WARMUP_POINTS - min_queue_len) * POLL_INTERVAL}秒可交易")
-    elif not WARMUP_LOGGED:
-        log(f"🔥 引擎预热完成！已收集 {min_queue_len} 个数据点，开始交易")
-        WARMUP_LOGGED = True
+        if not warmup_complete:
+            log(f"⏳ 引擎预热中... 需收集 {WARMUP_POINTS} 个数据点 (约{WARMUP_POINTS * POLL_INTERVAL}秒)")
+            warmup_complete = True  # 标记预热已开始
+        return  # 预热期不交易
+    else:
+        if warmup_complete != "DONE":
+            log(f"🔥 引擎预热完成！开始交易")
+            warmup_complete = "DONE"
 
     # 2. 遍历科技股，执行对冲策略
     for sym, name in TECH_SYMBOLS.items():
