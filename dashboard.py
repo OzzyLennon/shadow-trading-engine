@@ -22,6 +22,7 @@ ALPHA_PORTFOLIO = os.path.join(SCRIPT_DIR, "alpha_factory_portfolio.json")
 PERFORMANCE_FILE = os.path.join(SCRIPT_DIR, "strategy_performance.json")
 PROMOTED_FILE = os.path.join(SCRIPT_DIR, "promoted_strategies.json")
 RED_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
+BLUE_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_tech_portfolio.json")  # Blue Engine
 
 @st.cache_data(ttl=10) # 缓存10秒，防止高频刷新卡顿
 def load_json(filepath):
@@ -102,10 +103,12 @@ alpha_data = load_json(ALPHA_PORTFOLIO)
 perf_data = load_json(PERFORMANCE_FILE)
 promo_data = load_json(PROMOTED_FILE)
 red_data = load_json(RED_PORTFOLIO)
+blue_data = load_json(BLUE_PORTFOLIO)  # Blue Engine (科技对冲)
 
 # 获取所有持仓的实时价格
 all_symbols = set(red_data.get('positions', {}).keys())
 all_symbols.update(alpha_data.get('positions', {}).keys())
+all_symbols.update(blue_data.get('positions', {}).keys())  # Blue Engine 持仓
 realtime_prices = get_realtime_prices(list(all_symbols)) if all_symbols else {}
 
 # ================= 侧边栏: 哨兵与宏观控制 =================
@@ -135,11 +138,14 @@ st.title("👁️‍🗨️ APEX Alpha Factory 驾驶舱")
 # 计算核心指标
 cash_alpha = alpha_data.get('cash', 0)
 cash_red = red_data.get('cash', 0)
-total_cash = cash_alpha + cash_red
+cash_blue = blue_data.get('cash', 0)  # Blue Engine
+total_cash = cash_alpha + cash_red + cash_blue
 
 # 计算持仓市值和盈亏
 position_value = 0
 position_cost = 0
+
+# Red Engine 持仓 (煤电红利)
 for symbol, pos in red_data.get('positions', {}).items():
     shares = pos.get('total_shares', 0)
     cost = pos.get('cost', 0)
@@ -147,12 +153,22 @@ for symbol, pos in red_data.get('positions', {}).items():
     position_value += shares * current_price
     position_cost += shares * cost
 
+# Alpha Factory 持仓
 for symbol, pos in alpha_data.get('positions', {}).items():
     shares = pos.get('shares', 0)
     cost = pos.get('cost_price', 0)
     current_price = realtime_prices.get(symbol, {}).get('current', cost)
     position_value += shares * current_price
     position_cost += shares * cost
+
+# Blue Engine 持仓 (科技对冲)
+for symbol, pos in blue_data.get('positions', {}).items():
+    shares = pos.get('stock_shares', 0)
+    cost = pos.get('stock_cost', 0)
+    current_price = realtime_prices.get(symbol, {}).get('current', cost)
+    position_value += shares * current_price
+    position_cost += shares * cost
+    # 注意：Blue Engine 还有空头头寸，这里简化处理只算多头
 
 total_aum = total_cash + position_value
 total_profit = position_value - position_cost
@@ -258,7 +274,7 @@ with tab2:
         total_value += current_value
         total_cost += total_cost_pos
     
-    # APEX 持仓
+    # Red Engine 持仓 (煤电红利)
     for symbol, pos in red_positions.items():
         shares = pos.get('total_shares', 0)
         cost_price = pos.get('cost', 0)
@@ -278,8 +294,38 @@ with tab2:
             '盈亏金额': profit,
             '盈亏比例': profit_pct,
             '买入时间': '历史持仓',
-            '信号来源': 'APEX V5.0 (煤电红利)',
-            '引擎': 'APEX V5.0'
+            '信号来源': 'Red Engine (煤电红利)',
+            '引擎': 'Red Engine'
+        }
+        total_value += current_value
+        total_cost += total_cost_pos
+    
+    # Blue Engine 持仓 (科技对冲)
+    blue_positions = blue_data.get('positions', {})
+    for symbol, pos in blue_positions.items():
+        shares = pos.get('stock_shares', 0)
+        cost_price = pos.get('stock_cost', 0)
+        total_cost_pos = shares * cost_price
+        
+        current_price = realtime_prices.get(symbol, {}).get('current', cost_price)
+        current_value = shares * current_price
+        profit = current_value - total_cost_pos
+        profit_pct = (profit / total_cost_pos * 100) if total_cost_pos > 0 else 0
+        
+        bench_sym = pos.get('bench_sym', '')
+        bench_name = '中证1000ETF' if bench_sym == 'sh512100' else '沪深300ETF' if bench_sym == 'sh510300' else bench_sym
+        
+        all_positions[symbol] = {
+            '持股数量': shares,
+            '持仓均价': cost_price,
+            '当前价格': current_price,
+            '当前市值': current_value,
+            '占用资金': total_cost_pos,
+            '盈亏金额': profit,
+            '盈亏比例': profit_pct,
+            '买入时间': '历史持仓',
+            '信号来源': f'Blue Engine (对冲: {bench_name})',
+            '引擎': 'Blue Engine'
         }
         total_value += current_value
         total_cost += total_cost_pos
