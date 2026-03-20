@@ -1,0 +1,33 @@
+# Alpha Factory Cron 配置
+# 安装: crontab -e 然后粘贴以下内容
+
+# ================= 数据更新 =================
+# 每日18:00 更新日线数据
+0 18 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine/research && /usr/bin/python3 data_downloader.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/data_update.log 2>&1
+
+# ================= 因子挖掘 =================
+# 每日19:00 因子挖掘
+0 19 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine/research && /usr/bin/python3 factor_generator.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/factor_mining.log 2>&1
+
+# ================= WFA验证 =================
+# 每日20:00 WFA验证
+0 20 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine/research && /usr/bin/python3 auto_wfa_runner.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/wfa_validation.log 2>&1
+
+# ================= 交易执行 =================
+# 每日9:25 启动交易引擎 (煤电红利均值回归)
+25 9 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine && /usr/bin/python3 apex_quant_simulator.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/apex_daemon.log 2>&1 &
+
+# 每日9:26 启动Alpha Factory引擎 (新策略灰度测试)
+26 9 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine && /usr/bin/python3 alpha_factory_daemon.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/alpha_factory.log 2>&1 &
+
+# ================= 收盘清理 =================
+# 每日15:00 停止所有交易引擎
+0 15 * * 1-5 pkill -f apex_quant_simulator.py; pkill -f alpha_factory_daemon.py
+
+# ================= 性能评估 =================
+# 每周日16:00 评估策略表现 (末位淘汰)
+0 16 * * 0 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine && /usr/bin/python3 strategy_evaluator.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/evaluation.log 2>&1
+
+# ================= Sniper盯盘 =================
+# 每日14:45 Sniper监控
+45 14 * * 1-5 cd /root/quant_bot && /usr/bin/python3 sniper_monitor_final.py >> /root/quant_bot/run.log 2>&1

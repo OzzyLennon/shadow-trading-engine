@@ -1,0 +1,101 @@
+{
+  "timestamp": "2026-03-20 09:04:41",
+  "total_factors": 40,
+  "passed_factors": 10,
+  "thresholds": {
+    "ic_threshold": 0.03,
+    "ir_threshold": 0.15
+  },
+  "candidates": [
+    {
+      "factor_name": "volatility_60d",
+      "description": "波动率因子_60日",
+      "mean_ic": -0.0774,
+      "ic_ir": -0.2304,
+      "ic_std": 0.3359,
+      "positive_ic_ratio": 0.4,
+      "rank": 1
+    },
+    {
+      "factor_name": "ATR_14d",
+      "description": "真实波动幅度_14日",
+      "mean_ic": -0.0635,
+      "ic_ir": -0.2384,
+      "ic_std": 0.2664,
+      "positive_ic_ratio": 0.4,
+      "rank": 2
+    },
+    {
+      "factor_name": "ATR_20d",
+      "description": "真实波动幅度_20日",
+      "mean_ic": -0.0601,
+      "ic_ir": -0.2263,
+      "ic_std": 0.2655,
+      "positive_ic_ratio": 0.4,
+      "rank": 3
+    },
+    {
+      "factor_name": "volatility_10d",
+      "description": "波动率因子_10日",
+      "mean_ic": -0.0581,
+      "ic_ir": -0.2032,
+      "ic_std": 0.2858,
+      "positive_ic_ratio": 0.41,
+      "rank": 4
+    },
+    {
+      "factor_name": "volatility_20d",
+      "description": "波动率因子_20日",
+      "mean_ic": -0.0551,
+      "ic_ir": -0.1762,
+      "ic_std": 0.3125,
+      "positive_ic_ratio": 0.43,
+      "rank": 5
+    },
+    {
+      "factor_name": "volatility_5d",
+      "description": "波动率因子_5日",
+      "mean_ic": -0.0536,
+      "ic_ir": -0.209,
+      "ic_std": 0.2564,
+      "positive_ic_ratio": 0.4,
+      "rank": 6
+    },
+    {
+      "factor_name": "volume_ma_10d",
+      "description": "成交量均线_10日",
+      "mean_ic": 0.0477,
+      "ic_ir": 0.2284,
+      "ic_std": 0.2088,
+      "positive_ic_ratio": 0.6,
+      "rank": 7
+    },
+    {
+      "factor_name": "volume_ma_5d",
+      "description": "成交量均线_5日",
+      "mean_ic": 0.046,
+      "ic_ir": 0.2206,
+      "ic_std": 0.2083,
+      "positive_ic_ratio": 0.6,
+      "rank": 8
+    },
+    {
+      "factor_name": "volume_ma_20d",
+      "description": "成交量均线_20日",
+      "mean_ic": 0.0422,
+      "ic_ir": 0.2033,
+      "ic_std": 0.2075,
+      "positive_ic_ratio": 0.59,
+      "rank": 9
+    },
+    {
+      "factor_name": "volume_ma_60d",
+      "description": "成交量均线_60日",
+      "mean_ic": 0.0415,
+      "ic_ir": 0.2,
+      "ic_std": 0.2075,
+      "positive_ic_ratio": 0.6,
+      "rank": 10
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "timestamp": "2026-03-20 09:09:30",
+  "total_tested": 10,
+  "promoted_count": 4,
+  "thresholds": {
+    "win_rate": 0.6,
+    "sharpe": 1.5,
+    "haircut": 0.7
+  },
+  "strategies": [
+    {
+      "factor_name": "volume_ma_10d",
+      "signal_type": "high_volume_ma",
+      "period": 10,
+      "total_return": 0.0027,
+      "avg_return": 0.0003,
+      "std_return": 0.0013,
+      "sharpe_ratio": 3.2506,
+      "sharpe_ratio_haircut": 2.2754,
+      "win_rate": 0.6,
+      "num_windows": 10,
+      "wins": 6,
+      "losses": 4,
+      "strategy_name": "成交量均线策略_10日",
+      "description": "做多成交量均线高的股票",
+      "promoted_at": "2026-03-20 09:09:12"
+    },
+    {
+      "factor_name": "volume_ma_5d",
+      "signal_type": "high_volume_ma",
+      "period": 5,
+      "total_return": 0.0028,
+      "avg_return": 0.0003,
+      "std_return": 0.0012,
+      "sharpe_ratio": 3.8391,
+      "sharpe_ratio_haircut": 2.6874,
+      "win_rate": 0.6,
+      "num_windows": 10,
+      "wins": 6,
+      "losses": 4,
+      "strategy_name": "成交量均线策略_5日",
+      "description": "做多成交量均线高的股票",
+      "promoted_at": "2026-03-20 09:09:18"
+    },
+    {
+      "factor_name": "volume_ma_20d",
+      "signal_type": "high_volume_ma",
+      "period": 20,
+      "total_return": 0.0022,
+      "avg_return": 0.0002,
+      "std_return": 0.0012,
+      "sharpe_ratio": 2.9576,
+      "sharpe_ratio_haircut": 2.0703,
+      "win_rate": 0.6,
+      "num_windows": 10,
+      "wins": 6,
+      "losses": 4,
+      "strategy_name": "成交量均线策略_20日",
+      "description": "做多成交量均线高的股票",
+      "promoted_at": "2026-03-20 09:09:24"
+    },
+    {
+      "factor_name": "volume_ma_60d",
+      "signal_type": "high_volume_ma",
+      "period": 60,
+      "total_return": 0.003,
+      "avg_return": 0.0003,
+      "std_return": 0.001,
+      "sharpe_ratio": 4.7431,
+      "sharpe_ratio_haircut": 3.3202,
+      "win_rate": 0.6,
+      "num_windows": 10,
+      "wins": 6,
+      "losses": 4,
+      "strategy_name": "成交量均线策略_60日",
+      "description": "做多成交量均线高的股票",
+      "promoted_at": "2026-03-20 09:09:30"
+    }
+  ]
+}
