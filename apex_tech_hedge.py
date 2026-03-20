@@ -78,19 +78,77 @@ def load_history_prices(symbol, days=60):
     """
     csv_path = os.path.join(HISTORY_DATA_DIR, f"{symbol}_daily.csv")
     if not os.path.exists(csv_path):
-        return []
+        # CSV不存在，尝试自动下载
+        download_history_data(symbol)
+        if not os.path.exists(csv_path):
+            return []
     
+    return load_csv_prices(csv_path, days)
+
+def download_history_data(symbol):
+    """
+    自动下载历史数据（60天）
+    """
+    import requests
+    import time
+    
+    csv_path = os.path.join(HISTORY_DATA_DIR, f"{symbol}_daily.csv")
+    if os.path.exists(csv_path):
+        return True
+    
+    # 尝试新浪API
+    url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=0&datalen=1024"
+    
+    try:
+        log(f"📥 自动下载 {symbol} 历史数据...")
+        res = requests.get(url, timeout=15)
+        res.encoding = 'utf-8'
+        
+        import json
+        data = json.loads(res.text)
+        
+        if not data or not isinstance(data, list):
+            log(f"⚠️ {symbol} 无历史数据")
+            return False
+        
+        # 写入CSV
+        with open(csv_path, 'w') as f:
+            f.write("date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg\n")
+            
+            preclose = None
+            for day in reversed(data):
+                close_price = float(day['close'])
+                
+                if preclose is None:
+                    preclose = close_price
+                
+                pct = (close_price - preclose) / preclose * 100 if preclose > 0 else 0
+                
+                f.write(f"{day['day']},{symbol},{day['open']},{day['high']},{day['low']},{close_price},{preclose},{day['volume']},0,0,1,{pct:.4f}\n")
+                preclose = close_price
+        
+        log(f"✅ {symbol} 历史数据下载完成 ({len(data)} 条)")
+        time.sleep(0.3)  # 避免请求过快
+        return True
+        
+    except Exception as e:
+        log(f"❌ {symbol} 下载失败: {e}")
+        return False
+
+def load_csv_prices(csv_path, days=60):
+    """
+    从CSV文件读取最近N天收盘价
+    """
     try:
         with open(csv_path, 'r') as f:
             lines = f.readlines()
         
-        # 跳过表头，读取最近N天的收盘价
         prices = []
         for line in reversed(lines[1:]):  # 从最新往前读
             parts = line.strip().split(',')
             if len(parts) >= 5:
                 try:
-                    close = float(parts[4])  # close列
+                    close = float(parts[5])  # close列
                     prices.append(close)
                     if len(prices) >= days:
                         break
@@ -99,29 +157,33 @@ def load_history_prices(symbol, days=60):
         
         return list(reversed(prices))  # 恢复时间顺序（旧->新）
     except Exception as e:
-        log(f"⚠️ 加载历史数据失败 {symbol}: {e}")
+        log(f"⚠️ 读取CSV失败 {csv_path}: {e}")
         return []
 
 def preload_history_to_queue(p):
     """
     启动时预热队列，填充历史收盘价
+    自动检测并下载缺失数据
     """
     all_syms = list(TECH_SYMBOLS.keys()) + list(BENCHMARKS.keys())
     loaded = 0
     
     for sym in all_syms:
-        history = load_history_prices(sym, days=VOLATILITY_WINDOW + 10)  # 多加载一点
+        # 尝试加载CSV，不存在则自动下载
+        history = load_history_prices(sym, days=VOLATILITY_WINDOW + 10)
+        
         if history:
             if sym not in p["queues"]:
                 p["queues"][sym] = []
-            # 用历史数据填充队列（保留已有的实时数据）
             p["queues"][sym] = history[-MOMENTUM_WINDOW:] if len(history) > MOMENTUM_WINDOW else history
             loaded += 1
             log(f"📊 {sym} 预加载 {len(history)} 天历史数据")
+        else:
+            log(f"⚠️ {sym} 无历史数据，将使用实时数据")
     
     if loaded > 0:
         save_portfolio(p)
-        log(f"✅ 历史数据预热完成，{loaded} 只标的")
+        log(f"✅ 历史数据预热完成，{loaded}/{len(all_syms)} 只标的")
     
     return p
 
