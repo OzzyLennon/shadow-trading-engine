@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Alpha Factory 策略执行引擎 - 第三阶段
-=====================================
 动态读取 promoted_strategies.json，热更新策略
-
-特性:
-- 每日早盘9:00自动加载新策略
-- 灰度测试 (新策略只给10%仓位)
-- 末位淘汰制 (周末评估表现)
-
-作者: AI 量化研究助手
-日期: 2026-03-20
 """
 
 import json
@@ -24,25 +14,19 @@ import sys
 import glob
 import pandas as pd
 
-# 导入因子库 (DRY原则)
 from factor_lib import calculate_factor, get_realtime_prices_batch
+from core.config import load_env, load_config_with_fallback
+from core.errors import create_error_handler, log_error
+from core import functions
+from core.logging_config import get_logger
 
-# ================= 加载环境变量 =================
-def load_env():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    os.environ.setdefault(key.strip(), value.strip())
-
+# 加载环境变量和配置
 load_env()
+config = load_config_with_fallback()
 
 # ================= 核心配置 =================
-FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
-INITIAL_CAPITAL = 1000000.0
+FEISHU_WEBHOOK = config.api.feishu_webhook or ""
+INITIAL_CAPITAL = config.initial_capital
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PORTFOLIO_FILE = os.path.join(SCRIPT_DIR, "alpha_factory_portfolio.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "alpha_factory.log")
@@ -50,19 +34,27 @@ PROMOTED_FILE = os.path.join(SCRIPT_DIR, "promoted_strategies.json")
 DATA_DIR = os.path.join(SCRIPT_DIR, "research", "data")
 PERFORMANCE_FILE = os.path.join(SCRIPT_DIR, "strategy_performance.json")
 
-POLL_INTERVAL = 30  # 轮询间隔（秒）
+POLL_INTERVAL = config.poll_interval  # 轮询间隔（秒）
 
 # 交易时段
-MORNING_START = (9, 30)
-MORNING_END = (11, 30)
-AFTERNOON_START = (13, 0)
-AFTERNOON_END = (14, 57)
+MORNING_START = config.market_hours.morning_start
+MORNING_END = config.market_hours.morning_end
+AFTERNOON_START = config.market_hours.afternoon_start
+AFTERNOON_END = config.market_hours.afternoon_end
 
 # 灰度配置
-GRAY_WEIGHT = 0.10        # 新策略只给10%仓位
-MIN_CAPITAL_PER_TRADE = 10000  # 单笔最小金额
-MAX_POSITIONS = 10        # 单策略最多持有10只股票 (硬性截断)
-MAX_HOLDING_DAYS = 5      # 最大持仓天数 (调仓周期)
+GRAY_WEIGHT = config.alpha_factory.gray_weight        # 新策略只给10%仓位
+MIN_CAPITAL_PER_TRADE = config.alpha_factory.min_capital_per_trade  # 单笔最小金额
+MAX_POSITIONS = config.alpha_factory.max_positions        # 单策略最多持有10只股票 (硬性截断)
+MAX_HOLDING_DAYS = config.alpha_factory.max_holding_days      # 最大持仓天数 (调仓周期)
+
+# 交易成本
+COMMISSION_RATE = config.alpha_factory.commission_rate
+STAMP_DUTY_RATE = config.alpha_factory.stamp_duty_rate
+
+# ================= 日志和错误处理 =================
+logger = get_logger("alpha_factory")
+error_handler = create_error_handler(logger)
 
 # ================= 全局状态 =================
 running = True
@@ -89,15 +81,9 @@ def signal_handler(signum, frame):
     log("🛑 收到停止信号，正在优雅退出...")
     running = False
 
-def is_trading_time():
-    now = datetime.datetime.now()
-    if now.weekday() >= 5: return False
-    current_time = (now.hour, now.minute)
-    if MORNING_START <= current_time < MORNING_END: return True
-    if AFTERNOON_START <= current_time < AFTERNOON_END: return True
-    return False
 
 # ================= 策略加载 =================
+@error_handler
 def load_promoted_strategies():
     """加载晋级策略"""
     global strategies, last_strategy_load
@@ -129,6 +115,7 @@ def load_promoted_strategies():
     
     return False
 
+@error_handler
 def load_stock_pool():
     """加载股票池"""
     global stock_pool
@@ -141,6 +128,7 @@ def load_stock_pool():
     stock_pool = [os.path.basename(f).split('.')[0] for f in files]
     log(f"📊 股票池: {len(stock_pool)} 只")
 
+@error_handler
 def generate_signals():
     """生成交易信号 (使用绝对数量截断)"""
     global daily_signals
@@ -203,6 +191,7 @@ def generate_signals():
         log(f"   {factor_name}: {len(sig['long'])} 只股票看多")
 
 # ================= 组合管理 =================
+@error_handler
 def load_portfolio():
     """加载组合"""
     global portfolio
@@ -227,6 +216,7 @@ def save_portfolio():
         json.dump(portfolio, f, ensure_ascii=False, indent=2)
 
 # ================= 交易执行 =================
+@error_handler
 def execute_trade():
     """执行交易 (调仓逻辑: 先卖后买)"""
     if not daily_signals or not portfolio:
@@ -277,8 +267,14 @@ def execute_trade():
             shares = pos['shares']
             
             # 计算卖出收入 (扣除印花税+佣金)
-            revenue = shares * price * (1 - 0.001 - 0.0003)
-            profit = revenue - pos['total_cost']
+            sell_amount = shares * price
+            total_cost, net_revenue = functions.calculate_trade_costs(
+                sell_amount, is_buy=False,
+                commission=COMMISSION_RATE,
+                stamp_duty=STAMP_DUTY_RATE,
+                slippage=0  # 滑点已在价格中考虑
+            )
+            profit = net_revenue - pos['total_cost']
             
             # 记录交易
             portfolio['trades'].append({
@@ -286,7 +282,7 @@ def execute_trade():
                 'symbol': symbol,
                 'price': price,
                 'shares': shares,
-                'revenue': revenue,
+                'revenue': net_revenue,
                 'profit': profit,
                 'reason': reason,
                 'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -294,7 +290,7 @@ def execute_trade():
             })
             
             # 更新资金
-            cash += revenue
+            cash += net_revenue
             del positions[symbol]
             
             status = "🔴" if profit < 0 else "🟢"
@@ -331,35 +327,43 @@ def execute_trade():
         if shares < 100:
             continue
         
-        cost = shares * price * (1 + 0.0003)  # 手续费
-        
-        if cost > cash:
+        # 计算买入成本
+        buy_amount = shares * price
+        total_cost, net_cost = functions.calculate_trade_costs(
+            buy_amount, is_buy=True,
+            commission=COMMISSION_RATE,
+            stamp_duty=STAMP_DUTY_RATE,
+            slippage=0  # 滑点已在价格中考虑
+        )
+
+        if net_cost > cash:
             continue
-        
+
         # 执行买入
         positions[symbol] = {
             'shares': shares,
             'cost_price': price,
-            'total_cost': cost,
+            'total_cost': net_cost,
             'buy_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'strategies': [k for k, v in daily_signals.items() if symbol in v['long']]
         }
-        cash -= cost
+        cash -= net_cost
         portfolio['trades'].append({
             'type': 'buy',
             'symbol': symbol,
             'price': price,
             'shares': shares,
-            'cost': cost,
+            'cost': net_cost,
             'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
         
-        log(f"🟢 买入 {symbol}: {shares}股 @ {price:.3f}元, 成本{cost:.2f}")
+        log(f"🟢 买入 {symbol}: {shares}股 @ {price:.3f}元, 成本{net_cost:.2f}")
     
     portfolio['cash'] = cash
     save_portfolio()
 
 # ================= 性能追踪 (末位淘汰) =================
+@error_handler
 def update_performance():
     """更新策略性能"""
     if not os.path.exists(PERFORMANCE_FILE):
@@ -424,7 +428,12 @@ def main():
                 last_signal_time = now
         
         # 交易时段
-        if is_trading_time():
+        if functions.is_trading_time(
+            morning_start=MORNING_START,
+            morning_end=MORNING_END,
+            afternoon_start=AFTERNOON_START,
+            afternoon_end=AFTERNOON_END
+        ):
             execute_trade()
         
         # 收盘后更新性能

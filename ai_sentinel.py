@@ -1,60 +1,46 @@
 # -*- coding: utf-8 -*-
 """
 AI Sentinel V3.0 - 全局多战区风控司令
-=====================================
-角色：双引擎定向熔断系统
-
-核心职责：
-1. 同时监控 Red Engine (红利) 和 Blue Engine (科技)
-2. 输出 red_engine_allow / blue_engine_allow 双通道权限矩阵
-3. 定向熔断：煤炭政策打击 → Red熔断 Blue继续；芯片禁令 → Blue熔断 Red继续
-
-版本: 3.0.0
-日期: 2026-03-18
+双引擎定向熔断系统
 """
 
 import requests
 import json
 import datetime
 import os
+from typing import Dict, Any, Optional
 
-# ================= 加载环境变量 =================
-def load_env():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    os.environ.setdefault(key.strip(), value.strip())
+# 导入核心模块
+from core.config import load_env, load_config_with_fallback
+from core.errors import create_error_handler, log_error
+from core.logging_config import get_logger
 
+# 加载环境变量和配置
 load_env()
+config = load_config_with_fallback()
 
-# ================= 核心配置 =================
-FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
+# 核心配置
+FEISHU_WEBHOOK = config.api.feishu_webhook or ""
 LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-LLM_API_URL = os.environ.get("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions")
-LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-chat")
+LLM_API_URL = config.api.llm_api_url
+LLM_MODEL = config.api.llm_model
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "ai_sentinel.log")
 
+# ================= 日志和错误处理 =================
+logger = get_logger("ai_sentinel")
+error_handler = create_error_handler(logger)
+
 # ================= 工具函数 =================
 def log(message):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] {message}"
-    print(log_line)
-    try:
-        log_dir = os.path.dirname(LOG_FILE)
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(log_line + "\n")
-    except: pass
+    """统一的日志输出函数"""
+    logger.info(message)
+    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
 
-def fetch_morning_news():
+@error_handler
+def fetch_morning_news() -> str:
     """抓取新浪财经 A股 7x24小时滚动新闻"""
     log("📡 正在获取 A 股早盘核心资讯...")
     url = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=20&page=1"
@@ -74,7 +60,8 @@ def fetch_morning_news():
         log(f"⚠️ 新闻抓取失败: {e}")
         return "今日暂无重大宏观新闻。"
 
-def call_llm_risk_assessment(news_content):
+@error_handler
+def call_llm_risk_assessment(news_content: str) -> Dict[str, Any]:
     """
     调用大模型进行双引擎风险研判
     
@@ -154,36 +141,48 @@ def call_llm_risk_assessment(news_content):
             "global_market_status": "NORMAL"
         }
 
-def save_risk_config(risk_assessment):
+@error_handler
+def save_risk_config(risk_assessment: Dict[str, Any]) -> None:
     """保存双引擎风控配置到 daily_config.json"""
     try:
-        config = {}
+        daily_config = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                config = json.load(f)
-        
+                daily_config = json.load(f)
+
+        # 检查是否有变化
+        new_red = risk_assessment.get("red_engine_allow", True)
+        new_blue = risk_assessment.get("blue_engine_allow", True)
+        new_status = risk_assessment.get("global_market_status", "NORMAL")
+
+        if (daily_config.get("red_engine_allow") == new_red and
+            daily_config.get("blue_engine_allow") == new_blue and
+            daily_config.get("global_market_status") == new_status):
+            return  # 无变化，跳过写入
+
         # 更新双引擎风控字段
-        config["red_engine_allow"] = risk_assessment.get("red_engine_allow", True)
-        config["red_reasoning"] = risk_assessment.get("red_reasoning", "")
-        config["blue_engine_allow"] = risk_assessment.get("blue_engine_allow", True)
-        config["blue_reasoning"] = risk_assessment.get("blue_reasoning", "")
-        config["global_market_status"] = risk_assessment.get("global_market_status", "NORMAL")
-        
-        # 兼容旧字段（如果AI Brain还在用）
-        config["allow_trading"] = risk_assessment.get("red_engine_allow", True)
-        config["market_regime"] = risk_assessment.get("global_market_status", "NORMAL")
-        
-        config["risk_updated_at"] = datetime.datetime.now().isoformat()
-        
+        daily_config["red_engine_allow"] = new_red
+        daily_config["red_reasoning"] = risk_assessment.get("red_reasoning", "")
+        daily_config["blue_engine_allow"] = new_blue
+        daily_config["blue_reasoning"] = risk_assessment.get("blue_reasoning", "")
+        daily_config["global_market_status"] = new_status
+
+        # 兼容旧字段
+        daily_config["allow_trading"] = new_red
+        daily_config["market_regime"] = new_status
+
+        daily_config["risk_updated_at"] = datetime.datetime.now().isoformat()
+
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
-        
-        log(f"💾 风控配置已保存: red={config['red_engine_allow']}, blue={config['blue_engine_allow']}")
-        
+            json.dump(daily_config, f, indent=4, ensure_ascii=False)
+
+        log(f"💾 风控配置已保存: red={new_red}, blue={new_blue}")
+
     except Exception as e:
         log(f"❌ 保存配置失败: {e}")
 
-def send_risk_alert(risk_assessment):
+@error_handler
+def send_risk_alert(risk_assessment: Dict[str, Any]) -> None:
     """发送双引擎风控警报到飞书"""
     if not FEISHU_WEBHOOK:
         return
@@ -237,7 +236,8 @@ def send_risk_alert(risk_assessment):
     except Exception as e:
         log(f"⚠️ 飞书推送失败: {e}")
 
-def main():
+@error_handler
+def main() -> None:
     log("="*60)
     log("🧠 AI Sentinel V3.0 - 全局多战区风控司令启动")
     log("="*60)

@@ -1,0 +1,21 @@
+# APEX 量化交易系统依赖
+# Python 3.10+ required
+
+# 核心依赖
+requests>=2.28.0
+pandas>=1.5.0
+numpy>=1.23.0
+PyYAML>=6.0
+
+# 回测和研究
+baostock>=0.8.9
+
+# 可视化 (Dashboard)
+streamlit>=1.28.0
+plotly>=5.15.0
+
+# LLM集成 (AI Brain, AI Sentinel)
+# openai>=1.0.0  # 如使用OpenAI格式API
+
+# 测试
+pytest>=7.4.0

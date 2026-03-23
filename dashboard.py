@@ -7,25 +7,30 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import requests
+from typing import Dict, Any, Optional
 
-# ==========================================
-# APEX 量化中控台 V2.0 - 机构级全息驾驶舱
+from core.config import load_config_with_fallback
+
+# APEX 量化中控台 V2.0
 # 运行命令: streamlit run dashboard.py --server.port 8501
-# ==========================================
 
-# 页面全局配置 (暗黑极客风)
+# 加载配置
+config = load_config_with_fallback()
+
+# 页面全局配置
 st.set_page_config(page_title="APEX Quant Command Center", page_icon="👁️‍🗨️", layout="wide", initial_sidebar_state="expanded")
 
-# ================= 数据加载层 =================
+# 数据加载层
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ALPHA_PORTFOLIO = os.path.join(SCRIPT_DIR, "alpha_factory_portfolio.json")
 PERFORMANCE_FILE = os.path.join(SCRIPT_DIR, "strategy_performance.json")
 PROMOTED_FILE = os.path.join(SCRIPT_DIR, "promoted_strategies.json")
 RED_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
-BLUE_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_tech_portfolio.json")  # Blue Engine
+BLUE_PORTFOLIO = os.path.join(SCRIPT_DIR, "apex_tech_portfolio.json")
 
-@st.cache_data(ttl=10) # 缓存10秒，防止高频刷新卡顿
-def load_json(filepath):
+@st.cache_data(ttl=10)
+def load_json(filepath: str) -> Dict[str, Any]:
+    """加载JSON文件"""
     if os.path.exists(filepath):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
@@ -36,7 +41,7 @@ def load_json(filepath):
 
 # 实时价格获取
 @st.cache_data(ttl=5)
-def get_realtime_prices(symbols):
+def get_realtime_prices(symbols: list) -> Dict[str, Dict[str, Any]]:
     """批量获取实时价格"""
     if not symbols:
         return {}
@@ -175,7 +180,8 @@ total_profit = position_value - position_cost
 total_profit_pct = (total_profit / position_cost * 100) if position_cost > 0 else 0
 
 # 总收益率计算 (与收盘汇报一致)
-INITIAL_CAPITAL = 2000000  # Red Engine 100万 + Blue Engine 100万
+# 使用配置中的初始资金 × 2（双引擎）
+INITIAL_CAPITAL = config.initial_capital * 2
 total_return = (total_aum - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
 
 active_strats = len(promo_data.get('strategies', []))

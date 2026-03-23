@@ -4,33 +4,31 @@ import datetime
 import os
 import re
 
-# ================= 加载环境变量 =================
-def load_env():
-    """从 .env 文件加载环境变量"""
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    os.environ.setdefault(key.strip(), value.strip())
+# 导入核心模块
+from core.config import load_env, load_config_with_fallback
+from core.errors import create_error_handler, log_error
+from core.logging_config import get_logger
 
+# 加载环境变量和配置
 load_env()
-# ===============================================
+config = load_config_with_fallback()
 
-# ================= 核心配置区域 =================
-FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
+# 核心配置
+FEISHU_WEBHOOK = config.api.feishu_webhook or ""
 
 # AI 大模型配置
 LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-LLM_API_URL = os.environ.get("LLM_API_URL", "https://api.deepseek.com/v1/chat/completions")
-LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-chat")
+LLM_API_URL = config.api.llm_api_url
+LLM_MODEL = config.api.llm_model
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
 PORTFOLIO_FILE = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
 STATS_FILE = os.path.join(SCRIPT_DIR, "trade_stats.json")
+
+# 日志和错误处理
+logger = get_logger("ai_brain")
+error_handler = create_error_handler(logger)
 
 # 全市场股票池（供 AI 动态选择）
 FULL_SYMBOL_POOL = {
@@ -64,6 +62,7 @@ DEFAULT_SYMBOLS = {
 # 数据源升维：多维度数据采集
 # ===============================================
 
+@error_handler
 def fetch_morning_news():
     """抓取新浪财经 A股 7x24小时滚动新闻"""
     print("📡 正在获取 A 股早盘核心资讯...")
@@ -84,6 +83,7 @@ def fetch_morning_news():
         print(f"新闻抓取失败: {e}")
         return "今日暂无重大宏观新闻。"
 
+@error_handler
 def fetch_us_market():
     """
     获取隔夜美股表现
@@ -140,6 +140,7 @@ def fetch_us_market():
     
     return "\n".join(signals) if signals else "美股数据暂无"
 
+@error_handler
 def fetch_a50_futures():
     """
     获取富时A50期指表现
@@ -164,6 +165,7 @@ def fetch_a50_futures():
         print(f"A50期指获取失败: {e}")
         return "A50期指数据暂无"
 
+@error_handler
 def fetch_market_volume():
     """
     获取昨日两市成交额
@@ -204,6 +206,7 @@ def fetch_market_volume():
         print(f"成交额获取失败: {e}")
         return "成交额数据暂无"
 
+@error_handler
 def fetch_northbound_flow():
     """获取北向资金流向"""
     print("💰 正在获取北向资金流向...")
@@ -223,6 +226,7 @@ def fetch_northbound_flow():
         print(f"北向资金获取失败: {e}")
         return "北向资金数据暂无"
 
+@error_handler
 def fetch_margin_data():
     """获取融资融券数据"""
     print("📈 正在获取融资融券数据...")
@@ -246,6 +250,7 @@ def fetch_margin_data():
 # 反馈闭环：读取昨日表现
 # ===============================================
 
+@error_handler
 def fetch_yesterday_pnl():
     """
     读取昨日盈亏情况
@@ -296,6 +301,7 @@ def fetch_yesterday_pnl():
 # AI 大脑：思维链推理
 # ===============================================
 
+@error_handler
 def analyze_with_ai(news_text, us_market, a50, volume, northbound, margin, yesterday_pnl):
     """
     呼叫 AI 大脑进行综合投研分析
@@ -426,50 +432,52 @@ def analyze_with_ai(news_text, us_market, a50, volume, northbound, margin, yeste
 # 配置保存与早报发送
 # ===============================================
 
-def save_daily_config(config):
+@error_handler
+def save_daily_config(ai_config):
     """保存每日作战参数"""
-    config['date'] = str(datetime.date.today())
-    
-    # 添加交易成本配置
-    config['slippage'] = 0.002
-    config['stamp_duty'] = 0.001
-    config['commission'] = 0.00025
-    config['z_score_threshold'] = 2.0
-    
+    ai_config['date'] = str(datetime.date.today())
+
+    # 添加交易成本配置（使用统一配置）
+    ai_config['slippage'] = config.costs.slippage
+    ai_config['stamp_duty'] = config.costs.stamp_duty
+    ai_config['commission'] = config.costs.commission
+    ai_config['z_score_threshold'] = 2.0  # AI特定配置
+
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
+        json.dump(ai_config, f, indent=4, ensure_ascii=False)
     print("💾 每日作战参数已更新！")
 
-def send_morning_brief(config):
+@error_handler
+def send_morning_brief(ai_config):
     """发送飞书早报"""
-    
+
     color = "grey"
-    if "多" in config['market_sentiment']: color = "red"
-    elif "空" in config['market_sentiment']: color = "green"
-    
-    risk_emoji = {"极高": "🔴", "中等": "🟡", "安全": "🟢"}.get(config.get('risk_level', '中等'), "⚪")
-    
-    symbols_str = "\n".join([f"  - {code}: {name}" for code, name in list(config.get('symbols', {}).items())[:8]])
-    if len(config.get('symbols', {})) > 8:
-        symbols_str += f"\n  - ... 共{len(config['symbols'])}只"
-    
+    if "多" in ai_config['market_sentiment']: color = "red"
+    elif "空" in ai_config['market_sentiment']: color = "green"
+
+    risk_emoji = {"极高": "🔴", "中等": "🟡", "安全": "🟢"}.get(ai_config.get('risk_level', '中等'), "⚪")
+
+    symbols_str = "\n".join([f"  - {code}: {name}" for code, name in list(ai_config.get('symbols', {}).items())[:8]])
+    if len(ai_config.get('symbols', {})) > 8:
+        symbols_str += f"\n  - ... 共{len(ai_config['symbols'])}只"
+
     report = f"**🧠 AI 首席量化策略师晨会纪要 v2.0**\n\n"
     report += f"📅 **交易日**: {datetime.date.today()}\n"
-    report += f"🌡️ **市场定调**: **{config['market_sentiment']}**\n"
-    report += f"{risk_emoji} **风险等级**: {config.get('risk_level', '中等')}\n"
-    report += f"💡 **逻辑推演**: {config['reasoning']}\n"
-    report += f"🎯 **聚焦板块**: {', '.join(config.get('focus_sectors', ['未指定']))}\n\n"
-    
+    report += f"🌡️ **市场定调**: **{ai_config['market_sentiment']}**\n"
+    report += f"{risk_emoji} **风险等级**: {ai_config.get('risk_level', '中等')}\n"
+    report += f"💡 **逻辑推演**: {ai_config['reasoning']}\n"
+    report += f"🎯 **聚焦板块**: {', '.join(ai_config.get('focus_sectors', ['未指定']))}\n\n"
+
     report += f"---\n**⚙️ 作战参数**\n"
-    report += f"- 追涨阈值: `+{config['surge_threshold']*100:.1f}%`\n"
-    report += f"- 止损线: `{config['stop_loss_pct']*100:.0f}%`\n"
-    report += f"- 开火比例: `{config['trade_ratio']*100:.0f}%`\n\n"
-    
+    report += f"- 追涨阈值: `+{ai_config['surge_threshold']*100:.1f}%`\n"
+    report += f"- 止损线: `{ai_config['stop_loss_pct']*100:.0f}%`\n"
+    report += f"- 开火比例: `{ai_config['trade_ratio']*100:.0f}%`\n\n"
+
     report += f"---\n**📊 今日监控池**\n{symbols_str}\n"
-    
+
     # 如果有思维链，添加到报告
-    if config.get('thinking'):
-        thinking_preview = config['thinking'][:200] + "..." if len(config['thinking']) > 200 else config['thinking']
+    if ai_config.get('thinking'):
+        thinking_preview = ai_config['thinking'][:200] + "..." if len(ai_config['thinking']) > 200 else ai_config['thinking']
         report += f"\n---\n**🤔 AI 思考过程**\n> {thinking_preview}\n"
 
     payload = {
@@ -487,6 +495,7 @@ def send_morning_brief(config):
         requests.post(FEISHU_WEBHOOK, json=payload)
     except: pass
 
+@error_handler
 def main():
     print("="*50)
     print(f"[{datetime.datetime.now()}] 🧠 AI 大脑启动 (v2.0 深度优化版)")
