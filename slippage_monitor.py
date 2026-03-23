@@ -10,15 +10,29 @@ import json
 import datetime
 import os
 import time
+import sys
+from typing import Dict, List, Any, Optional
+
+from core.config import load_env, load_config_with_fallback
+from core.errors import create_error_handler, log_error
+from core.logging_config import get_logger
+
+# 加载环境变量和配置
+load_env()
+config = load_config_with_fallback()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PORTFOLIO_FILE = os.path.join(SCRIPT_DIR, "apex_portfolio.json")
 SLIPPAGE_LOG = os.path.join(SCRIPT_DIR, "logs", "slippage_monitor.json")
 
 # 理论滑点设置
-THEORETICAL_SLIPPAGE = 0.002  # 0.2%
+THEORETICAL_SLIPPAGE = config.costs.slippage
 
-def get_sina_price(symbol):
+# 日志和错误处理
+logger = get_logger("slippage_monitor")
+error_handler = create_error_handler(logger)
+
+def get_sina_price(symbol: str) -> Optional[Dict[str, Any]]:
     """获取新浪财经价格"""
     url = f"http://hq.sinajs.cn/list={symbol}"
     headers = {'Referer': 'http://finance.sina.com.cn'}
@@ -35,10 +49,10 @@ def get_sina_price(symbol):
                     "sell1": float(data[7]) if len(data) > 7 and data[7] else 0,
                 }
     except Exception as e:
-        print(f"新浪获取失败: {e}")
+        logger.error(f"新浪获取失败: {e}")
     return None
 
-def get_eastmoney_price(symbol):
+def get_eastmoney_price(symbol: str) -> Optional[Dict[str, Any]]:
     """获取东方财富盘口价格"""
     # 转换代码格式
     if symbol.startswith('sh'):
@@ -47,10 +61,10 @@ def get_eastmoney_price(symbol):
         secid = f"0.{symbol[2:]}"
     else:
         secid = symbol
-    
+
     url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f57,f58"
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
+
     try:
         res = requests.get(url, headers=headers, timeout=5)
         data = res.json()
@@ -63,10 +77,11 @@ def get_eastmoney_price(symbol):
                 "sell1": d.get('f45', 0) / 100 if d.get('f45') else 0,
             }
     except Exception as e:
-        print(f"东方财富获取失败: {e}")
+        logger.error(f"东方财富获取失败: {e}")
     return None
 
-def calculate_slippage_gap(symbol, name):
+@error_handler
+def calculate_slippage_gap(symbol: str, name: str) -> Optional[Dict[str, Any]]:
     """
     计算滑点差距
     返回：新浪价格、东财价格、差距百分比
@@ -100,83 +115,93 @@ def calculate_slippage_gap(symbol, name):
         "actual_vs_theoretical": gap_pct - (THEORETICAL_SLIPPAGE * 100)
     }
 
-def log_slippage(result):
+MAX_SLIPPAGE_RECORDS = 1000  # 最大记录数
+
+def log_slippage(result: Dict[str, Any]) -> None:
     """记录滑点数据"""
     log_dir = os.path.dirname(SLIPPAGE_LOG)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    
+
     # 读取现有记录
     records = []
     if os.path.exists(SLIPPAGE_LOG):
         try:
-            with open(SLIPPAGE_LOG, 'r') as f:
+            with open(SLIPPAGE_LOG, 'r', encoding='utf-8') as f:
                 records = json.load(f)
         except:
             records = []
-    
-    records.append(result)
-    
-    # 保存
-    with open(SLIPPAGE_LOG, 'w') as f:
-        json.dump(records, f, indent=2, ensure_ascii=False)
-    
-    print(f"📝 滑点记录已保存: {result['symbol']} {result['name']}")
 
-def monitor_slippage(symbols):
+    records.append(result)
+
+    # 限制记录数量，保留最新的记录
+    if len(records) > MAX_SLIPPAGE_RECORDS:
+        records = records[-MAX_SLIPPAGE_RECORDS:]
+
+    # 保存
+    with open(SLIPPAGE_LOG, 'w', encoding='utf-8') as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+
+    logger.info(f"滑点记录已保存: {result['symbol']} {result['name']}")
+
+@error_handler
+def monitor_slippage(symbols: Dict[str, str]) -> List[Dict[str, Any]]:
     """
     监控多个股票的滑点
     """
+    logger.info(f"滑点监控报告 - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"\n{'='*50}")
     print(f"📊 滑点监控报告 - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}")
-    
+
     results = []
     for symbol, name in symbols.items():
         result = calculate_slippage_gap(symbol, name)
         if result:
             results.append(result)
-            
+
             # 打印结果
             print(f"\n📌 {name} ({symbol})")
             print(f"   新浪卖一价: {result['sina_price']:.3f}")
             print(f"   东财卖一价: {result['eastmoney_price']:.3f}")
             print(f"   价差: {result['gap']:.3f} ({result['gap_pct']:.3f}%)")
             print(f"   理论滑点: {result['theoretical_slippage']:.2f}%")
-            
+
             if result['actual_vs_theoretical'] > 0:
                 print(f"   ⚠️ 实际滑点超出理论: +{result['actual_vs_theoretical']:.3f}%")
             else:
                 print(f"   ✅ 实际滑点在理论范围内")
-            
+
             # 记录到文件
             log_slippage(result)
-    
+
     # 统计汇总
     if results:
         avg_gap = sum(r['gap_pct'] for r in results) / len(results)
         max_gap = max(r['gap_pct'] for r in results)
         exceed_count = sum(1 for r in results if r['actual_vs_theoretical'] > 0)
-        
+
         print(f"\n{'='*50}")
         print(f"📈 汇总统计")
         print(f"   平均价差: {avg_gap:.3f}%")
         print(f"   最大价差: {max_gap:.3f}%")
         print(f"   超出理论滑点次数: {exceed_count}/{len(results)}")
-    
+
     return results
 
-def generate_daily_report():
+@error_handler
+def generate_daily_report() -> None:
     """
     生成每日滑点报告
     """
     if not os.path.exists(SLIPPAGE_LOG):
+        logger.info("暂无滑点记录")
         print("暂无滑点记录")
         return
-    
-    with open(SLIPPAGE_LOG, 'r') as f:
+
+    with open(SLIPPAGE_LOG, 'r', encoding='utf-8') as f:
         records = json.load(f)
-    
+
     # 按日期分组
     by_date = {}
     for r in records:
@@ -184,42 +209,44 @@ def generate_daily_report():
         if date not in by_date:
             by_date[date] = []
         by_date[date].append(r)
-    
+
     print(f"\n{'='*50}")
     print(f"📊 每日滑点报告")
     print(f"{'='*50}")
-    
+
     for date, recs in sorted(by_date.items(), reverse=True)[:7]:
         avg_gap = sum(r['gap_pct'] for r in recs) / len(recs)
         exceed = sum(1 for r in recs if r['actual_vs_theoretical'] > 0)
-        
+
         print(f"\n📅 {date}")
         print(f"   记录次数: {len(recs)}")
         print(f"   平均价差: {avg_gap:.3f}%")
         print(f"   超出理论: {exceed}/{len(recs)}")
 
 if __name__ == "__main__":
-    import sys
-    
     # 默认股票池
     DEFAULT_SYMBOLS = {
-        "sh601138": "工业富联", "sz000938": "紫光股份", 
+        "sh601138": "工业富联", "sz000938": "紫光股份",
         "sh600030": "中信证券", "sz002594": "比亚迪",
         "sz159819": "人工智能ETF", "sh512880": "证券ETF"
     }
-    
-    # 读取今日配置
-    config_file = os.path.join(SCRIPT_DIR, "daily_config.json")
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-            symbols = config.get('symbols', DEFAULT_SYMBOLS)
-        except:
-            symbols = DEFAULT_SYMBOLS
+
+    # 优先使用配置文件中的股票池
+    if config.symbols:
+        symbols = config.symbols
     else:
-        symbols = DEFAULT_SYMBOLS
-    
+        # 尝试读取每日配置
+        config_file = os.path.join(SCRIPT_DIR, "daily_config.json")
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    daily_config = json.load(f)
+                symbols = daily_config.get('symbols', DEFAULT_SYMBOLS)
+            except:
+                symbols = DEFAULT_SYMBOLS
+        else:
+            symbols = DEFAULT_SYMBOLS
+
     if len(sys.argv) > 1 and sys.argv[1] == 'report':
         # 生成报告
         generate_daily_report()
