@@ -170,11 +170,12 @@ def fetch_market_volume():
     """
     获取昨日两市成交额
     用于判断市场活跃度
+    多API备用：东方财富 → 新浪财经 → 腾讯财经 → 网易财经
     """
     print("📊 正在获取昨日成交额...")
     
+    # 方法1: 尝试东方财富 (已失效)
     try:
-        # 东方财富两市成交额接口
         url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=5&klt=1&secid=1.000001&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=10)
@@ -183,34 +184,87 @@ def fetch_market_volume():
         if data.get('data', {}).get('klines'):
             kline = data['data']['klines'][0]
             parts = kline.split(',')
-            # 成交额（元）
             amount = float(parts[6]) if len(parts) > 6 else 0
-            amount_yi = amount / 100000000  # 转换为亿
+            amount_yi = amount / 100000000
             
-            # 判断放量/缩量
-            if amount_yi < 7000:
-                volume_status = "极度缩量（防守）"
-            elif amount_yi < 9000:
-                volume_status = "缩量"
-            elif amount_yi < 12000:
-                volume_status = "正常"
-            elif amount_yi < 15000:
-                volume_status = "放量"
-            else:
-                volume_status = "巨量（进攻）"
-            
-            return f"昨日成交额: {amount_yi:.0f}亿 ({volume_status})"
-        
-        return "成交额数据暂无"
+            if amount_yi > 0:
+                volume_status = "极度缩量（防守）" if amount_yi < 7000 else \
+                              "缩量" if amount_yi < 9000 else \
+                              "正常" if amount_yi < 12000 else \
+                              "放量" if amount_yi < 15000 else "巨量（进攻）"
+                return f"昨日成交额: {amount_yi:.0f}亿 ({volume_status})"
     except Exception as e:
-        print(f"成交额获取失败: {e}")
-        return "成交额数据暂无"
+        print(f"  [备用1] 东方财富成交额失败: {e}")
+    
+    # 方法2: 新浪财经 (需要编码转换)
+    try:
+        import subprocess
+        cmd = 'curl -s "https://hq.sinajs.cn/list=sh000001" -H "Referer: https://finance.sina.com.cn" | iconv -f GBK -t UTF-8'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if result.stdout:
+            parts = result.stdout.split('"')[1].split(',')
+            if len(parts) >= 10:
+                amount = float(parts[9]) if parts[9] else 0
+                amount_yi = amount / 100000000
+                
+                if amount_yi > 0:
+                    volume_status = "极度缩量（防守）" if amount_yi < 7000 else \
+                                  "缩量" if amount_yi < 9000 else \
+                                  "正常" if amount_yi < 12000 else \
+                                  "放量" if amount_yi < 15000 else "巨量（进攻）"
+                    return f"昨日成交额: {amount_yi:.0f}亿 ({volume_status}) [新浪]"
+    except Exception as e:
+        print(f"  [备用2] 新浪成交额失败: {e}")
+    
+    # 方法3: 腾讯财经
+    try:
+        url = "https://qt.gtimg.cn/q=sh000001"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.text
+            parts = data.split('~')
+            if len(parts) > 37:
+                amount = float(parts[37]) if parts[37] else 0
+                amount_yi = amount / 100000000
+                
+                if amount_yi > 0:
+                    volume_status = "极度缩量（防守）" if amount_yi < 7000 else \
+                                  "缩量" if amount_yi < 9000 else \
+                                  "正常" if amount_yi < 12000 else \
+                                  "放量" if amount_yi < 15000 else "巨量（进攻）"
+                    return f"昨日成交额: {amount_yi:.0f}亿 ({volume_status}) [腾讯]"
+    except Exception as e:
+        print(f"  [备用3] 腾讯成交额失败: {e}")
+    
+    # 方法4: 网易财经 (备用)
+    try:
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y%m%d")
+        url = f"http://quotes.money.163.com/service/chddata.html?code=0000001&start={yesterday}&end={yesterday}&fields=VOLUME,AMOUNT"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200 and res.text.strip():
+            lines = res.text.strip().split('\n')
+            if len(lines) > 1:
+                cols = lines[1].split(',')
+                if len(cols) >= 11:
+                    amount = float(cols[10]) if cols[10] else 0
+                    amount_yi = amount / 100000000
+                    if amount_yi > 0:
+                        return f"昨日成交额: {amount_yi:.0f}亿 [网易]"
+    except Exception as e:
+        print(f"  [备用4] 网易成交额失败: {e}")
+    
+    return "成交额数据暂无"
 
 @error_handler
 def fetch_northbound_flow():
-    """获取北向资金流向"""
+    """
+    获取北向资金流向
+    多API备用 - 注意: 北向资金数据较难获取免费API
+    """
     print("💰 正在获取北向资金流向...")
     
+    # 方法1: 东方财富 (已失效，保留备用)
     try:
         url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=1&klt=1&secid=1.000001&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -220,17 +274,58 @@ def fetch_northbound_flow():
             kline = data['data']['klines'][0]
             parts = kline.split(',')
             flow = float(parts[6]) if len(parts) > 6 else 0
-            return f"北向资金成交额: {flow/100000000:.2f}亿元"
-        return "北向资金数据暂无"
+            if flow != 0:
+                return f"北向资金成交额: {flow/100000000:.2f}亿元"
     except Exception as e:
-        print(f"北向资金获取失败: {e}")
-        return "北向资金数据暂无"
+        print(f"  [备用1] 东方财富北向失败: {e}")
+    
+    # 方法2: 腾讯财经 - 港股通 (沪/深)
+    try:
+        url = "https://qt.gtimg.cn/q=sh90001,sz90001"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200 and 'v_pv_none_match' not in res.text:
+            import re
+            data = res.text
+            total = 0
+            for part in data.split('=')[1:]:
+                match = re.search(r'~(-?\d+\.?\d*)~', part)
+                if match:
+                    amount = float(match.group(1)) / 100000000
+                    total += amount
+            
+            if total != 0:
+                direction = "净流入" if total > 0 else "净流出"
+                return f"北向资金: {direction} {abs(total):.2f}亿元 [腾讯港股通]"
+    except Exception as e:
+        print(f"  [备用2] 腾讯港股通失败: {e}")
+    
+    # 方法3: 尝试从上证指数变化推算 (间接)
+    try:
+        import subprocess
+        cmd = 'curl -s "https://hq.sinajs.cn/list=sh000001" -H "Referer: https://finance.sina.com.cn" | iconv -f GBK -t UTF-8'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if result.stdout and 'hq_str' in result.stdout:
+            parts = result.stdout.split('"')[1].split(',')
+            if len(parts) >= 10:
+                amount = float(parts[9]) if parts[9] else 0
+                amount_yi = amount / 100000000
+                if amount_yi > 5000:
+                    return f"北向资金: 参考成交额 {amount_yi:.0f}亿 (上证) [新浪]"
+    except Exception as e:
+        print(f"  [备用3] 新浪北向推算失败: {e}")
+    
+    return "北向资金数据暂无 (免费API受限)"
 
 @error_handler
 def fetch_margin_data():
-    """获取融资融券数据"""
+    """
+    获取融资融券数据
+    多API备用
+    """
     print("📈 正在获取融资融券数据...")
     
+    # 方法1: 东方财富 (已失效，保留备用)
     try:
         url = "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_MARGIN_FINANCE&columns=TRADE_DATE,TOTAL_FINANCE&pageSize=1"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -240,11 +335,48 @@ def fetch_margin_data():
             item = data['result']['data'][0]
             date = item.get('TRADE_DATE', '')
             amount = item.get('TOTAL_FINANCE', 0)
-            return f"融资余额: {amount/100000000:.2f}亿元 (截止{date})"
-        return "融资融券数据暂无"
+            if amount > 0:
+                return f"融资余额: {amount/100000000:.2f}亿元 (截止{date})"
     except Exception as e:
-        print(f"融资融券获取失败: {e}")
-        return "融资融券数据暂无"
+        print(f"  [备用1] 东方财富融资融券失败: {e}")
+    
+    # 方法2: 新浪财经融资融券
+    try:
+        import subprocess
+        cmd = 'curl -s "https://hq.sinajs.cn/list=sz399001" -H "Referer: https://finance.sina.com.cn" | iconv -f GBK -t UTF-8'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if result.stdout:
+            parts = result.stdout.split('"')[1].split(',')
+            if len(parts) >= 10:
+                amount = float(parts[9]) if parts[9] else 0
+                amount_yi = amount / 100000000
+                if amount_yi > 0:
+                    return f"两市成交额参考: {amount_yi:.0f}亿 (深证成指) [新浪]"
+    except Exception as e:
+        print(f"  [备用2] 新浪融资融券失败: {e}")
+    
+    # 方法3: 使用深证成指和上证指数的总成交额估算
+    try:
+        import subprocess
+        cmd = 'curl -s "https://hq.sinajs.cn/list=sh000001,sz399001" -H "Referer: https://finance.sina.com.cn" | iconv -f GBK -t UTF-8'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if result.stdout:
+            total_amount = 0
+            for line in result.stdout.split('\n'):
+                if 'hq_str' in line and '=' in line:
+                    parts = line.split('"')[1].split(',')
+                    if len(parts) >= 10 and parts[9]:
+                        total_amount += float(parts[9])
+            
+            total_yi = total_amount / 100000000
+            if total_yi > 0:
+                return f"两市成交额: {total_yi:.0f}亿 [新浪合并]"
+    except Exception as e:
+        print(f"  [备用3] 合并计算失败: {e}")
+    
+    return "融资融券数据暂无"
 
 # ===============================================
 # 反馈闭环：读取昨日表现
