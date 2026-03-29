@@ -10,6 +10,7 @@ from core import functions
 from core.config import load_env, load_config_with_fallback
 from core.errors import create_error_handler, log_error, TradingSystemError
 from core.logging_config import get_logger
+from core.history_queue import load_queue_history, save_queue_history, fetch_preheat_data_from_akshare
 
 # 加载环境变量和配置
 load_env()
@@ -77,6 +78,11 @@ last_account_trade = None
 ema_prices = {}
 portfolio_loaded = False  # 标记是否已加载过持仓
 prev_prices = {}
+
+# ================= 预热期配置 =================
+# 每天首次启动需要5分钟预热 (60个点 * 5秒 = 300秒)
+WARMUP_POINTS = config.strategy.warmup_points  # 60个点
+warmup_complete = False  # 预热完成标志
 
 def signal_handler(signum, frame):
     global running
@@ -161,20 +167,71 @@ def load_portfolio():
                     for sym, pos in p["positions"].items():
                         pos["available_shares"] = pos["total_shares"]
                     p["date"] = today_str
-                    p["price_queue"] = {}   
-                    p["long_ema_queue"] = {}
+
+                    # 不再清空队列，改为预热加载
+                    log("📊 正在预热历史队列数据...")
+                    fallback_count = 0
+                    for sym in SYMBOLS.keys():
+                        # 优先尝试加载本地历史
+                        price_q, long_q, is_fresh = load_queue_history(sym, max_len=60)
+
+                        if not is_fresh or len(price_q) < 20:
+                            # 本地数据不新鲜或不足，从 AkShare 获取
+                            price_q, long_q, fallback = fetch_preheat_data_from_akshare(
+                                sym, minutes=60, ema_alpha=EMA_ALPHA
+                            )
+                            if fallback:
+                                fallback_count += 1
+
+                        if "price_queue" not in p: p["price_queue"] = {}
+                        if "long_ema_queue" not in p: p["long_ema_queue"] = {}
+                        p["price_queue"][sym] = price_q
+                        p["long_ema_queue"][sym] = long_q
+
+                    if fallback_count > 0:
+                        log(f"⚠️ {fallback_count} 只股票将使用预热锁实时收集数据")
+
                 elif not portfolio_loaded:
-                    log("🔄 引擎重启，清空队列数据...")
-                    p["price_queue"] = {}
-                    p["long_ema_queue"] = {}
+                    log("🔄 引擎重启，尝试恢复队列数据...")
+
+                    # 重启时：尝试加载历史或从 AkShare 预热
+                    for sym in SYMBOLS.keys():
+                        if sym not in p.get("price_queue", {}):
+                            p["price_queue"] = p.get("price_queue", {})
+                            p["price_queue"][sym] = []
+                        if sym not in p.get("long_ema_queue", {}):
+                            p["long_ema_queue"] = p.get("long_ema_queue", {})
+                            p["long_ema_queue"][sym] = []
+
+                        # 如果队列数据不足，从历史文件或 AkShare 补充
+                        if len(p["price_queue"][sym]) < 20:
+                            price_q, long_q, is_fresh = load_queue_history(sym, max_len=60)
+
+                            if not is_fresh or len(price_q) < 20:
+                                price_q, long_q, _ = fetch_preheat_data_from_akshare(
+                                    sym, minutes=60, ema_alpha=EMA_ALPHA
+                                )
+
+                            p["price_queue"][sym] = price_q
+                            p["long_ema_queue"][sym] = long_q
+
                     portfolio_loaded = True
                 return p
         except Exception: pass
-            
+
     return {"date": today_str, "cash": INITIAL_CAPITAL, "positions": {}, "price_queue": {}, "long_ema_queue": {}}
 
 @error_handler
 def save_portfolio(portfolio):
+    # 保存队列历史到独立文件
+    for sym in portfolio.get("price_queue", {}).keys():
+        save_queue_history(
+            sym,
+            portfolio["price_queue"][sym],
+            portfolio.get("long_ema_queue", {}).get(sym, [])
+        )
+
+    # 保存主账本
     with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
         json.dump(portfolio, f, indent=4)
 
@@ -214,9 +271,44 @@ def send_alert(alerts, total_assets, cash):
 
 @error_handler
 def scan_market():
+    global warmup_complete
     p = load_portfolio()
     data = get_market_data()
     if not data: return
+
+    # ================= 预热锁检查 =================
+    # 计算所有股票的最小队列长度
+    min_queue_len = min(
+        (len(p.get("price_queue", {}).get(sym, [])) for sym in SYMBOLS.keys()),
+        default=0
+    )
+
+    if min_queue_len < WARMUP_POINTS:
+        # 预热期：只填充数据，不执行任何交易判断
+        for sym, info in data.items():
+            price = info["current"]
+            name = info["name"]
+            if not is_valid_price(sym, price, name): continue
+
+            smoothed_price = calculate_ema(sym, price)
+
+            # 填充短期队列
+            if sym not in p["price_queue"]: p["price_queue"][sym] = []
+            p["price_queue"][sym].append(smoothed_price)
+            if len(p["price_queue"][sym]) > MOMENTUM_WINDOW: p["price_queue"][sym].pop(0)
+
+            # 填充长期队列
+            if sym not in p["long_ema_queue"]: p["long_ema_queue"][sym] = []
+            p["long_ema_queue"][sym].append(smoothed_price)
+            if len(p["long_ema_queue"][sym]) > EMA_PERIOD: p["long_ema_queue"][sym].pop(0)
+
+        log(f"⏳ Red Engine 预热中... 已收集 {min_queue_len}/{WARMUP_POINTS} 个数据点")
+        save_portfolio(p)
+        return  # 预热期直接返回，不执行后续交易逻辑
+
+    if warmup_complete == False:
+        log(f"🔥 Red Engine 预热完成！开始交易")
+        warmup_complete = True
 
     # 检查风控开关
     if not check_allow_trading():

@@ -81,11 +81,14 @@
 
 所有实盘引擎均内嵌以下机构级风控基建：
 
-1. **EMA 滤波器 (微观降噪)**：平滑 3-5 秒级 Tick 数据的随机游走与恶意"画线"。  
-2. **状态机冷却锁 (Cooldown)**：具备股票级（10分钟）和账户级（3分钟）射击冷却，防止高频环境下的"一秒打光子弹"。  
-3. **除权陷阱规避**：底层数据彻底清洗，规避高分红股除息日造成的"假暴跌" Z-Score 信号。  
+1. **EMA 滤波器 (微观降噪)**：平滑 3-5 秒级 Tick 数据的随机游走与恶意"画线"。
+2. **状态机冷却锁 (Cooldown)**：具备股票级（10分钟）和账户级（3分钟）射击冷却，防止高频环境下的"一秒打光子弹"。
+3. **除权陷阱规避**：底层数据彻底清洗，规避高分红股除息日造成的"假暴跌" Z-Score 信号。
 4. **独立双轨账本**：Red 和 Blue 引擎拥有完全隔离的 JSON 虚拟账本与资金池，互不干扰，支持精准的对冲净头寸（Net Exposure）结算。
-5. **重启队列清空**：引擎重启时自动清空价格队列，防止历史数据污染 Z-Score 计算。
+5. **预热锁机制**：引擎启动时强制收集 60 个数据点（5分钟）才开始交易，防止早盘数据不足导致的"神经病"信号。
+6. **跨日队列持久化**：队列数据持久化保存到本地 JSON，支持 AkShare 分钟级 K 线预热，确保跨日 Z-Score 计算稳定。
+7. **动态滑点校验**：Blue Engine 在买入前检测涨跌停状态和 Legging Risk，估算动态滑点和冲击成本。
+8. **数据源容错降级**：AkShare 数据源失败时自动降级到实时收集模式，确保系统不崩溃。
 
 ## **📁 核心文件结构**
 
@@ -98,12 +101,20 @@ shadow-trading-engine/
 ├── daily_config.json            # 全局风控配置
 ├── apex_portfolio.json          # Red Engine 账本
 ├── apex_tech_portfolio.json     # Blue Engine 账本
+├── core/                        # 核心模块
+│   ├── config.py                # 统一配置管理
+│   ├── functions.py             # 通用计算函数
+│   ├── history_queue.py         # 历史队列持久化
+│   ├── dynamic_slippage.py      # 动态滑点校验
+│   └── errors.py                # 错误处理
+├── slippage_monitor.py          # 滑点监控脚本
 ├── research/                    # 风洞实验室
 │   ├── backtest_engine.py       # 回测引擎
 │   ├── hedge_engine.py          # 对冲回测
 │   ├── dynamic_beta_hedge.py    # 动态Beta对冲
 │   ├── walk_forward.py          # WFA验证
 │   └── data/                    # 历史数据
+│       └── queues/              # 队列持久化存储
 └── logs/
     ├── apex_daemon.log          # Red Engine 日志
     ├── apex_tech_hedge.log      # Blue Engine 日志
@@ -166,6 +177,6 @@ crontab -l | grep -E "(APEX|Red|Blue|apex)"
 
 ---
 
-**版本**: V5.0  
-**更新日期**: 2026-03-18  
-**核心特性**: 双引擎并行 + 动态Beta对冲 + 基准智能切换
+**版本**: V5.1
+**更新日期**: 2026-03-29
+**核心特性**: 双引擎并行 + 动态Beta对冲 + 预热锁 + 队列持久化 + 滑点校验
