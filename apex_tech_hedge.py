@@ -9,6 +9,7 @@ from core import functions
 from core.config import load_env, load_config_with_fallback
 from core.errors import create_error_handler, log_error, TradingSystemError
 from core.logging_config import get_logger
+from core.dynamic_slippage import check_trade_feasibility, check_limit_status
 
 # 加载环境变量和配置
 load_env()
@@ -181,7 +182,11 @@ def get_market_data():
                 parts = line.split('="')[1].split(';')[0].split(',')
                 if len(parts) > 3:
                     name = TECH_SYMBOLS.get(sym, BENCHMARKS.get(sym, parts[0]))
-                    data[sym] = {"name": name, "price": float(parts[3])}
+                    data[sym] = {
+                        "name": name,
+                        "price": float(parts[3]),
+                        "prev_close": float(parts[2])  # 昨收价，用于涨跌停判断
+                    }
         return data
     except: return {}
 
@@ -393,6 +398,48 @@ def scan_market():
                 bench_shares = functions.calculate_shares(short_amount, bench_price, lot_size=100)
 
                 if stock_shares > 0 and bench_shares > 0:
+                    # === 滑点和冲击成本校验 ===
+                    # 检查涨停状态
+                    stock_prev_close = data[sym].get("prev_close", stock_price)
+                    bench_prev_close = data[bench_sym].get("prev_close", bench_price)
+
+                    stock_is_limit_up, stock_is_limit_down = check_limit_status(
+                        stock_price, stock_prev_close, limit_pct=0.1
+                    )
+                    etf_is_limit_up, etf_is_limit_down = check_limit_status(
+                        bench_price, bench_prev_close, limit_pct=0.1
+                    )
+
+                    # 科创板/创业板涨跌停为20%
+                    if sym.startswith("sh688") or sym.startswith("sz300"):
+                        stock_is_limit_up, stock_is_limit_down = check_limit_status(
+                            stock_price, stock_prev_close, limit_pct=0.2
+                        )
+
+                    feasible, reason, slip_details = check_trade_feasibility(
+                        stock_symbol=sym,
+                        stock_price=stock_price,
+                        stock_amount=long_amount,
+                        etf_symbol=bench_sym,
+                        etf_price=bench_price,
+                        etf_amount=short_amount,
+                        stock_is_limit_up=stock_is_limit_up,
+                        stock_is_limit_down=stock_is_limit_down,
+                        etf_is_limit_up=etf_is_limit_up,
+                        etf_is_limit_down=etf_is_limit_down,
+                        max_acceptable_slippage=0.015  # 最大 1.5% 滑点
+                    )
+
+                    if not feasible:
+                        log(f"🚫 对冲交易不可行: {reason}")
+                        log(f"   滑点详情: {slip_details}")
+                        continue
+
+                    if "legging_risk" in slip_details:
+                        alerts.append(f"⚠️ **Legging Risk 警告**\n"
+                                      f"ETF {bench_name} 流动性不足，对冲存在失败风险\n"
+                                      f"建议: 降低仓位或等待流动性恢复")
+
                     # 扣除多头成本
                     buy_amount = stock_shares * stock_price
                     total_cost, net_amount = functions.calculate_trade_costs(

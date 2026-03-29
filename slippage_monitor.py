@@ -45,6 +45,7 @@ def get_sina_price(symbol: str) -> Optional[Dict[str, Any]]:
                 return {
                     "name": data[0],
                     "current": float(data[3]) if data[3] else 0,
+                    "prev_close": float(data[2]) if data[2] else 0,  # 昨收价
                     "buy1": float(data[6]) if len(data) > 6 and data[6] else 0,
                     "sell1": float(data[7]) if len(data) > 7 and data[7] else 0,
                 }
@@ -253,3 +254,88 @@ if __name__ == "__main__":
     else:
         # 实时监控
         monitor_slippage(symbols)
+
+
+# ================= 涨跌停检测函数 =================
+def check_limit_up(symbol: str, limit_pct: float = 0.1) -> bool:
+    """
+    检查股票是否涨停
+
+    Args:
+        symbol: 股票代码
+        limit_pct: 涨停幅度 (默认10%)
+
+    Returns:
+        True 如果涨停
+    """
+    data = get_eastmoney_price(symbol)
+    if not data:
+        return False
+
+    current = data.get('current', 0)
+    buy1 = data.get('buy1', 0)
+
+    # 涨停特征：买一价等于当前价，且有大量买单
+    # 简化判断：买一价存在且与当前价一致
+    if buy1 > 0 and abs(buy1 - current) / current < 0.001:
+        return True
+
+    # 获取昨收价判断涨幅
+    sina = get_sina_price(symbol)
+    if sina and 'prev_close' in sina:
+        prev_close = sina['prev_close']
+        if prev_close > 0:
+            change_pct = (current - prev_close) / prev_close
+            if change_pct >= limit_pct - 0.001:
+                return True
+
+    return False
+
+
+def check_limit_down(symbol: str, limit_pct: float = 0.1) -> bool:
+    """
+    检查股票是否跌停
+
+    Args:
+        symbol: 股票代码
+        limit_pct: 跌停幅度 (默认10%)
+
+    Returns:
+        True 如果跌停
+    """
+    data = get_eastmoney_price(symbol)
+    if not data:
+        return False
+
+    current = data.get('current', 0)
+    sell1 = data.get('sell1', 0)
+
+    # 跌停特征：卖一价等于当前价，且有大量卖单
+    # 简化判断：卖一价存在且与当前价一致
+    if sell1 > 0 and abs(sell1 - current) / current < 0.001:
+        return True
+
+    # 获取昨收价判断跌幅
+    sina = get_sina_price(symbol)
+    if sina and 'prev_close' in sina:
+        prev_close = sina['prev_close']
+        if prev_close > 0:
+            change_pct = (current - prev_close) / prev_close
+            if change_pct <= -limit_pct + 0.001:
+                return True
+
+    return False
+
+
+def check_limit_status(symbol: str, limit_pct: float = 0.1) -> tuple:
+    """
+    检查股票涨跌停状态
+
+    Args:
+        symbol: 股票代码
+        limit_pct: 涨跌停幅度 (默认10%)
+
+    Returns:
+        (is_limit_up, is_limit_down)
+    """
+    return check_limit_up(symbol, limit_pct), check_limit_down(symbol, limit_pct)

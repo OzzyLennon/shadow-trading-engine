@@ -45,6 +45,7 @@ class StrategyConfig:
     use_ema_filter: bool = False
     use_adaptive_threshold: bool = True  # 新增: 启用自适应阈值
     min_signal_confirmations: int = 2    # 新增: 信号确认最小因子数
+    warmup_points: int = 60              # 预热所需数据点数 (60 * 5秒 = 5分钟)
 
     # Blue Engine 特有参数
     z_buy_threshold: float = 1.5      # Blue Engine 买入阈值（动量突破）
