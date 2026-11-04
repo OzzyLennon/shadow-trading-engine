@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 # 导入核心模块
 from core.config import load_env, load_config_with_fallback
 from core.errors import create_error_handler, log_error
-from core.logging_config import get_logger
+from core.logging_config import get_logger, setup_logger
 
 # 加载环境变量和配置
 load_env()
@@ -30,7 +30,7 @@ CONFIG_FILE = os.path.join(SCRIPT_DIR, "daily_config.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "ai_sentinel.log")
 
 # ================= 日志和错误处理 =================
-logger = get_logger("ai_sentinel")
+logger = setup_logger("ai_sentinel", log_file=LOG_FILE)
 error_handler = create_error_handler(logger)
 
 # ================= 工具函数 =================
@@ -183,7 +183,12 @@ def save_risk_config(risk_assessment: Dict[str, Any]) -> None:
 
 @error_handler
 def send_risk_alert(risk_assessment: Dict[str, Any]) -> None:
-    """发送双引擎风控警报到飞书"""
+    """发送双引擎风控警报到飞书
+
+    只在「熔断 / 黑天鹅」时推送，正常通行时只落日志。
+    理由：本项目已有 ai_brain 早报(08:30) + daily_report(15:01) 两张飞书卡，
+    再加一张每日"✅ 双引擎通行"纯属噪音；真正需要人看到的是熔断信号。
+    """
     if not FEISHU_WEBHOOK:
         return
     
@@ -206,6 +211,11 @@ def send_risk_alert(risk_assessment: Dict[str, Any]) -> None:
     else:
         template = "green"
         status = "✅ 双引擎通行"
+
+    # 正常通行 → 不打扰，只写日志
+    if red_allow and blue_allow and global_status == "NORMAL":
+        log(f"✅ 风控通行，未推送飞书（red=True blue=True status=NORMAL）")
+        return
     
     report = f"**🛡️ AI Sentinel V3.0 - 全局风控司令**\n\n"
     report += f"**全局状态**: {global_status}\n"

@@ -575,6 +575,35 @@ def save_daily_config(ai_config):
     ai_config['commission'] = config.costs.commission
     ai_config['z_score_threshold'] = 2.0  # AI特定配置
 
+    # ========== 修复: 不覆盖 Red Engine 的 symbols ==========
+    # Red Engine (apex_quant_simulator.py) 有硬编码的煤电默认标的
+    # AI 大脑不应覆盖 symbols，避免持仓与监控标的脱节
+    # Blue Engine 等其他引擎的符号由各引擎自己管理
+    if 'symbols' in ai_config:
+        del ai_config['symbols']
+        print("INFO: 保留 Red Engine 煤电标的池（使用硬编码默认值）")
+
+    # ========== 修复: 保留 AI Sentinel 的风控字段 ==========
+    # ai_sentinel.py 会把 red_engine_allow / blue_engine_allow /
+    # global_market_status 写进同一个 daily_config.json。
+    # ai_brain 每天 08:30 全量覆写该文件，若不保留，风控开关会被清空，
+    # 导致 AI Sentinel 的熔断决策丢失（引擎退回默认"允许交易"）。
+    RISK_KEYS = (
+        'red_engine_allow', 'blue_engine_allow', 'global_market_status',
+        'red_reasoning', 'blue_reasoning', 'allow_trading', 'market_regime',
+        'risk_updated_at',
+    )
+    existing = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception as e:
+            print(f"WARN: 读取现有配置失败，风控字段将被清空: {e}")
+    for k in RISK_KEYS:
+        if k in existing and k not in ai_config:
+            ai_config[k] = existing[k]
+
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(ai_config, f, indent=4, ensure_ascii=False)
     print("💾 每日作战参数已更新！")
