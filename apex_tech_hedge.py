@@ -77,7 +77,7 @@ last_alert_time = {}       # 上次报警时间
 
 # ================= 预热期配置 =================
 # 每天首次启动需要5分钟预热 (60个点 * 5秒 = 300秒)
-WARMUP_POINTS = VOLATILITY_WINDOW  # 60个点
+WARMUP_POINTS = 60  # 60个点
 warmup_complete = False  # 预热完成标志（全局变量）
 
 def signal_handler(signum, frame):
@@ -376,12 +376,11 @@ def scan_market():
             # 三因子共振：动量突破 + 低波动蓄势 + RSI确认
             if momentum_trigger and is_low_vol and p["cash"] > 20000:
                 # 信号确认 (新增)
-                confirmed, confirmations = functions.confirm_buy_signal(
+                confirmed, detail = functions.confirm_buy_signal_weighted(
                     z_score=current_z,
                     volume_ratio=1.0,
                     price_vs_ema=0,  # 动量策略不需要EMA偏离
                     rsi=rsi,
-                    min_confirmations=1  # 降低确认要求，动量策略更宽松
                 )
 
                 if not confirmed:
@@ -471,14 +470,12 @@ def scan_market():
                         "beta_applied": dyn_beta
                     }
 
-                    # 构建确认因子描述
-                    confirm_desc = [k for k, v in confirmations.items() if v]
                     alerts.append(f"🚀 **低波蓄势 + 动量突破共振** (Z={current_z:.2f})\n"
                                   f"📊 近{VOLATILITY_WINDOW}个5秒波动率: `{recent_vol*100:.2f}%` (< 3% 低波门槛)\n"
                                   f"🟢 做多: {name} `{stock_shares}股`\n"
                                   f"🔴 做空: {bench_name} `{bench_shares}股`\n"
                                   f"📐 动态 Beta 配平: `β = {dyn_beta:.2f}`\n"
-                                  f"✅ 确认因子: {', '.join(confirm_desc)}")
+                                  f"✅ 确认: 综合分={detail['score']} [{detail['strength']}] | 各因子={detail['factors']}")
             
             # 动量触发但波动率过高 - 静默，不发送报警
             # elif momentum_trigger and not is_low_vol and p["cash"] > 20000:

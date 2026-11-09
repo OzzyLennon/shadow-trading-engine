@@ -17,12 +17,15 @@
 # 每日9:25 启动交易引擎 (煤电红利均值回归)
 25 9 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine && /usr/bin/python3 apex_quant_simulator.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/apex_daemon.log 2>&1 &
 
+# 每日9:26 启动Blue Engine科技对冲引擎
+26 9 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine && /usr/bin/python3 apex_tech_hedge.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/apex_tech_hedge.log 2>&1 &
+
 # 每日9:26 启动Alpha Factory引擎 (新策略灰度测试)
 26 9 * * 1-5 cd /root/.openclaw/workspace-autonomous/shadow-trading-engine && /usr/bin/python3 alpha_factory_daemon.py >> /root/.openclaw/workspace-autonomous/shadow-trading-engine/logs/alpha_factory.log 2>&1 &
 
 # ================= 收盘清理 =================
 # 每日15:00 停止所有交易引擎
-0 15 * * 1-5 pkill -f apex_quant_simulator.py; pkill -f alpha_factory_daemon.py
+0 15 * * 1-5 pkill -f apex_quant_simulator.py; pkill -f apex_tech_hedge.py; pkill -f alpha_factory_daemon.py
 
 # ================= 性能评估 =================
 # 每周日16:00 评估策略表现 (末位淘汰)

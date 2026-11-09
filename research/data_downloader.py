@@ -25,16 +25,25 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # 尝试导入数据源
+# 2026-11-04 改优先级：akshare 优先、baostock 兜底。
+# 原因：baostock 自 2026-04-21 起 login 就卡死（协议握手无响应，每个标的要等
+# 2 分钟才超时），整条链路的个股数据停在 4-21 —— 因子挖掘、WFA 验证、策略晋级
+# 全在拿 7 个月前的旧数据自我循环，日志却一路显示「✅ 保存成功」。
+# 实测 akshare（东方财富）通；而且指数接口 download_index_daily 本来就在用它。
 try:
-    import baostock as bs
-    DATA_SOURCE = "baostock"
+    import akshare as ak
+    DATA_SOURCE = "akshare"
 except ImportError:
     try:
-        import yfinance as yf
-        DATA_SOURCE = "yfinance"
+        import baostock as bs
+        DATA_SOURCE = "baostock"
     except ImportError:
-        DATA_SOURCE = None
-        print("⚠️ 请安装数据源: pip install baostock 或 pip install yfinance")
+        try:
+            import yfinance as yf
+            DATA_SOURCE = "yfinance"
+        except ImportError:
+            DATA_SOURCE = None
+            print("⚠️ 请安装数据源: pip install akshare 或 baostock 或 yfinance")
 
 # ================= 配置区 =================
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
@@ -76,17 +85,72 @@ def download_stock_daily(
     logger.info(f"📥 下载 {symbol} 日线数据: {start_date} ~ {end_date}")
     
     try:
-        if DATA_SOURCE == "baostock":
+        if DATA_SOURCE == "akshare":
+            df = _download_akshare(symbol, start_date, end_date, adjust)
+            if df is None:
+                # 主源没数据 → 退到备源（baostock 自 2026-04-21 已卡死，
+                # 这里只会白等 2 分钟，所以放在最后兜底）
+                logger.warning(f"⚠️ {symbol} akshare 无数据，回退 baostock")
+                df = _download_baostock(symbol, start_date, end_date, adjust)
+            return df
+        elif DATA_SOURCE == "baostock":
             return _download_baostock(symbol, start_date, end_date, adjust)
         elif DATA_SOURCE == "yfinance":
             return _download_yfinance(symbol, start_date, end_date, adjust)
         else:
-            logger.error("❌ 无可用数据源，请安装 baostock 或 yfinance")
+            logger.error("❌ 无可用数据源，请安装 akshare / baostock / yfinance")
             return None
         
     except Exception as e:
         logger.error(f"❌ {symbol} 下载失败: {e}")
         return None
+
+
+def _download_akshare(symbol: str, start_date: str, end_date: str, adjust: str) -> Optional[pd.DataFrame]:
+    """使用 akshare（东方财富）下载 A 股日线。
+
+    输出列结构与 _download_baostock **完全一致**，下游（清洗 / 技术指标 / 因子）
+    完全无感知。
+
+    ⚠️ 单位对齐（用 2026-03-30、04-02 两天的 baostock 老数据实测校验过）：
+      - akshare 成交量单位是**手**，baostock 是**股** → 这里 ×100
+        （实测 385074 手 ×100 = 38,507,400 股 vs baostock 38,507,357，尾差 43 股）
+      - 成交额：都是元
+      - 换手率、涨跌幅：都是**百分数**（0.12 表示 0.12%）
+
+    ⚠️ 前复权价与 baostock 有约 4% 差异（两家除权基准日不同）。
+      这不构成断层 —— 下载器是**全量覆盖**（start_date 到今天整段重下），
+      不会把两种基准的数据拼在一起。
+    """
+    import akshare as ak
+
+    # sh600000 → 600000（东财只要 6 位数字）
+    code = symbol[2:] if symbol[:2] in ("sh", "sz") else symbol
+    start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
+    end = f"{end_date[:4]}-{start_date[4:6]}-{end_date[6:8]}"
+
+    df = ak.stock_zh_a_hist(symbol=code, period="daily",
+                             start_date=start, end_date=end,
+                             adjust=adjust if adjust in ("qfq", "hfq") else "")
+    if df is None or df.empty:
+        return None
+
+    out = pd.DataFrame({
+        "date": pd.to_datetime(df["日期"]),
+        "code": f"{symbol[:2]}.{symbol[2:]}" if symbol[:2] in ("sh", "sz") else symbol,
+        "open": pd.to_numeric(df["开盘"], errors="coerce"),
+        "high": pd.to_numeric(df["最高"], errors="coerce"),
+        "low": pd.to_numeric(df["最低"], errors="coerce"),
+        "close": pd.to_numeric(df["收盘"], errors="coerce"),
+        "volume": pd.to_numeric(df["成交量"], errors="coerce") * 100,  # 手 → 股
+        "amount": pd.to_numeric(df["成交额"], errors="coerce"),
+        "turnover": pd.to_numeric(df["换手率"], errors="coerce"),
+        "pct_change": pd.to_numeric(df["涨跌幅"], errors="coerce"),
+    })
+    out = out.sort_values("date").reset_index(drop=True)
+
+    logger.info(f"✅ {symbol} 获取 {len(out)} 条日线数据 (akshare)")
+    return out
 
 
 def _download_baostock(symbol: str, start_date: str, end_date: str, adjust: str) -> Optional[pd.DataFrame]:
@@ -298,8 +362,13 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         # 价格为0或负数
         df = df[df['close'] > 0]
         # 单日涨跌幅超过20%视为异常
+        # ⚠️ 2026-11-04 修正：pct_change 的单位是**百分数**（0.1538 表示 0.1538%），
+        # 这里原来写的是 0.20 → 实际只保留 |涨跌幅| < 0.2% 的行，
+        # 把 84% 的正常交易日当"异常值"删了（日志里 534 → 84 条就是这么来的；
+        # 存下来的 CSV 里 pct_change 范围恰好卡在 [-0.1984, 0.1992]）。
+        # 阈值 20 = 20%。
         if 'pct_change' in df.columns:
-            df = df[abs(df['pct_change']) < 0.20]
+            df = df[abs(df['pct_change']) < 20]
     
     # 去除缺失值
     df = df.dropna()

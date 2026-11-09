@@ -193,12 +193,16 @@ def log_error(logger: logging.Logger, error: Exception,
         if error_dict.get('error_code'):
             log_message = f"[{error_dict['error_code']}] {log_message}"
 
-        logger.log(level, log_message, extra=error_dict)
+        # 避免与 LogRecord.message 冲突
+        safe_extra = {k: v for k, v in error_dict.items() if k != 'message'}
+        safe_extra['error_msg'] = error_dict.get('message', '')
+
+        logger.log(level, log_message, extra=safe_extra)
     else:
         # 普通异常
         error_info = {
             "error_type": error.__class__.__name__,
-            "message": str(error),
+            "error_msg": str(error),
             "timestamp": datetime.now().isoformat(),
             "traceback": traceback.format_exc()
         }

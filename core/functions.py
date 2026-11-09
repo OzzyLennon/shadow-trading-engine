@@ -397,7 +397,7 @@ def confirm_buy_signal(z_score: float, volume_ratio: float = 1.0,
                        rsi: Optional[float] = None,
                        min_confirmations: int = 2) -> Tuple[bool, Dict[str, bool]]:
     """
-    多因子买入信号确认
+    多因子买入信号确认（等权投票版，保留兼容）
 
     通过多个因子交叉验证，减少假信号触发
 
@@ -418,9 +418,7 @@ def confirm_buy_signal(z_score: float, volume_ratio: float = 1.0,
         "rsi_oversold": rsi is not None and rsi < 30
     }
 
-    # 统计确认因子数量
     confirmed_count = sum(1 for v in confirmations.values() if v)
-
     return confirmed_count >= min_confirmations, confirmations
 
 
@@ -429,7 +427,7 @@ def confirm_sell_signal(z_score: float, momentum_exhausted: bool = False,
                         profit_ratio: float = 0.0,
                         min_confirmations: int = 1) -> Tuple[bool, Dict[str, bool]]:
     """
-    多因子卖出信号确认
+    多因子卖出信号确认（等权投票版，保留兼容）
 
     Args:
         z_score: Z-Score值
@@ -445,12 +443,191 @@ def confirm_sell_signal(z_score: float, momentum_exhausted: bool = False,
         "z_score_normal": z_score > 0,
         "momentum_exhausted": momentum_exhausted,
         "price_above_ema": price_above_ema,
-        "profit_target": profit_ratio > 0.05  # 盈利超过5%
+        "profit_target": profit_ratio > 0.05
     }
-
     confirmed_count = sum(1 for v in confirmations.values() if v)
-
     return confirmed_count >= min_confirmations, confirmations
+
+
+# ==================== 加权聚合版信号确认 ====================
+# 参考 ai-hedge-fund 多 Agent 协作思路：不是数票数，而是加权评分
+
+BUY_FACTOR_WEIGHTS = {
+    "z_score":  0.40,   # Z-Score 是核心信号，权重最高
+    "volume":   0.20,   # 放量确认辅助
+    "ema":      0.20,   # 趋势确认
+    "rsi":      0.20,   # 超卖确认
+}
+
+SELL_FACTOR_WEIGHTS = {
+    "z_score":  0.30,   # Z-Score 回归是核心
+    "momentum": 0.25,   # 动量衰竭
+    "ema":      0.20,   # 趋势破坏
+    "profit":   0.25,   # 盈利目标
+}
+
+# 买入信号阈值
+BUY_SCORE_THRESHOLD = 0.50   # 综合分 > 0.5 才触发
+BUY_STRONG_THRESHOLD = 0.70  # > 0.7 是强信号
+
+# 卖出信号阈值
+SELL_SCORE_THRESHOLD = 0.45  # 综合分 > 0.45 就考虑卖
+
+
+def score_buy_signal(
+    z_score: float,
+    volume_ratio: float = 1.0,
+    price_vs_ema: float = 0.0,
+    rsi: Optional[float] = None,
+) -> Tuple[float, Dict[str, float], str]:
+    """
+    多因子买入信号加权评分（参考 ai-hedge-fund 思路）
+
+    每个因子输出 0~1 的分数，最后加权求和。
+    Z-Score 极度偏离时触发置信度放大（类似 ai-hedge-fund 里强 Agent 信号提升整体置信度）。
+
+    Args:
+        z_score: Z-Score 值，越低越恐慌
+        volume_ratio: 成交量比率（当前/平均），>1 放量
+        price_vs_ema: 价格相对 EMA 偏离度，<-0 表示低于均线
+        rsi: RSI 指标，可选
+
+    Returns:
+        (综合分数, 各因子得分, 信号强度描述)
+    """
+    # Z-Score 因子：<-1.5 开始确认，<-2.5 是强确认
+    # 线性映射：-1.5 → 0，-2.5 → 1，低于 -2.5 保持 1.0
+    if z_score < -2.5:
+        z_score_factor = 1.0
+    elif z_score < -1.5:
+        z_score_factor = (z_score + 2.5) / 1.0  # -1.5→0, -2.5→1
+    else:
+        z_score_factor = 0.0
+
+    # 成交量因子：>1.2 确认，>1.5 强
+    vol_factor = max(0.0, min(1.0, (volume_ratio - 0.8) / 0.7)) if volume_ratio > 1.2 else 0.0
+
+    # EMA 因子：<-0.05（低于均线5%）强确认
+    ema_factor = max(0.0, min(1.0, (-price_vs_ema - 0.02) / 0.03)) if price_vs_ema < -0.02 else 0.0
+
+    # RSI 因子：<30 超卖确认，<20 强
+    rsi_factor = 0.0
+    if rsi is not None:
+        if rsi < 20:
+            rsi_factor = 1.0
+        elif rsi < 30:
+            rsi_factor = 0.8
+        elif rsi < 40:
+            rsi_factor = 0.3
+
+    # 加权求和
+    scores = {
+        "z_score": z_score_factor,
+        "volume":  vol_factor,
+        "ema":     ema_factor,
+        "rsi":     rsi_factor,
+    }
+    total = (
+        scores["z_score"] * BUY_FACTOR_WEIGHTS["z_score"]
+        + scores["volume"]  * BUY_FACTOR_WEIGHTS["volume"]
+        + scores["ema"]     * BUY_FACTOR_WEIGHTS["ema"]
+        + scores["rsi"]     * BUY_FACTOR_WEIGHTS["rsi"]
+    )
+
+    # 信号强度描述
+    if total >= BUY_STRONG_THRESHOLD:
+        strength = "强买入"
+    elif total >= BUY_SCORE_THRESHOLD:
+        strength = "买入"
+    elif total >= 0.3:
+        strength = "关注"
+    else:
+        strength = "观望"
+
+    return total, scores, strength
+
+
+def score_sell_signal(
+    z_score: float,
+    momentum_exhausted: bool = False,
+    price_above_ema: bool = False,
+    profit_ratio: float = 0.0,
+) -> Tuple[float, Dict[str, float], str]:
+    """
+    多因子卖出信号加权评分
+
+    Args:
+        z_score: Z-Score 值，>0 表示情绪偏高
+        momentum_exhausted: 动量是否衰竭
+        price_above_ema: 价格是否站上均线（卖出的反面条件）
+        profit_ratio: 当前盈亏比例
+
+    Returns:
+        (综合分数, 各因子得分, 信号强度描述)
+    """
+    # Z-Score 因子：>0 开始确认，>1 是强信号
+    z_factor = max(0.0, min(1.0, (z_score) / 1.5)) if z_score > 0 else 0.0
+
+    # 动量衰竭因子
+    momentum_factor = 1.0 if momentum_exhausted else 0.0
+
+    # EMA 因子：价格在均线上方时看空不利（设为低分）
+    ema_factor = 0.8 if not price_above_ema else 0.2
+
+    # 盈利目标因子：盈利越多越考虑兑现
+    profit_factor = max(0.0, min(1.0, profit_ratio / 0.10)) if profit_ratio > 0.03 else 0.0
+
+    scores = {
+        "z_score":  z_factor,
+        "momentum": momentum_factor,
+        "ema":      ema_factor,
+        "profit":   profit_factor,
+    }
+    total = (
+        scores["z_score"]  * SELL_FACTOR_WEIGHTS["z_score"]
+        + scores["momentum"] * SELL_FACTOR_WEIGHTS["momentum"]
+        + scores["ema"]     * SELL_FACTOR_WEIGHTS["ema"]
+        + scores["profit"]  * SELL_FACTOR_WEIGHTS["profit"]
+    )
+
+    if total >= 0.70:
+        strength = "强卖出"
+    elif total >= SELL_SCORE_THRESHOLD:
+        strength = "卖出"
+    elif total >= 0.25:
+        strength = "持有观察"
+    else:
+        strength = "持有"
+
+    return total, scores, strength
+
+
+def confirm_buy_signal_weighted(z_score: float, volume_ratio: float = 1.0,
+                               price_vs_ema: float = 0.0,
+                               rsi: Optional[float] = None) -> Tuple[bool, Dict]:
+    """
+    加权聚合版买入信号（调用入口）
+
+    参考 ai-hedge-fund Portfolio Manager 思路：
+    各因子 Agent 输出信号分数，Portfolio Manager 汇总做最终决策。
+
+    Returns:
+        (是否触发买入, {"score": 综合分, "scores": 各因子分, "strength": 描述})
+    """
+    total, scores, strength = score_buy_signal(z_score, volume_ratio, price_vs_ema, rsi)
+    confirmed = total >= BUY_SCORE_THRESHOLD
+    return confirmed, {"score": round(total, 3), "factors": {k: round(v, 3) for k, v in scores.items()}, "strength": strength}
+
+
+def confirm_sell_signal_weighted(z_score: float, momentum_exhausted: bool = False,
+                                  price_above_ema: bool = False,
+                                  profit_ratio: float = 0.0) -> Tuple[bool, Dict]:
+    """
+    加权聚合版卖出信号（调用入口）
+    """
+    total, scores, strength = score_sell_signal(z_score, momentum_exhausted, price_above_ema, profit_ratio)
+    confirmed = total >= SELL_SCORE_THRESHOLD
+    return confirmed, {"score": round(total, 3), "factors": {k: round(v, 3) for k, v in scores.items()}, "strength": strength}
 
 
 def calculate_beta_robust(stock_returns: List[float], bench_returns: List[float],

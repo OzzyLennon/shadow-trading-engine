@@ -327,10 +327,12 @@ def load_config(config_file: Optional[str] = None) -> TradingConfig:
         "daily_config.json"
     ])
 
+    loaded_from = None
     for filepath in config_files:
         try:
             file_config = TradingConfig.from_file(filepath)
             config = file_config
+            loaded_from = filepath
             break
         except FileNotFoundError:
             continue
@@ -338,6 +340,37 @@ def load_config(config_file: Optional[str] = None) -> TradingConfig:
             raise ConfigError(f"配置文件解析失败 {filepath}: {e}")
         except Exception as e:
             continue
+
+    # 环境变量优先级最高，再次覆盖（确保 .env 的配置不被文件配置覆盖）
+    if feishu_webhook := os.getenv("FEISHU_WEBHOOK"):
+        config.api.feishu_webhook = feishu_webhook
+    if llm_api_url := os.getenv("LLM_API_URL"):
+        config.api.llm_api_url = llm_api_url
+    if llm_model := os.getenv("LLM_MODEL"):
+        config.api.llm_model = llm_model
+
+    # ⚠️ 风控开关必须**总是**来自 daily_config.json
+    #   （ai_sentinel.py 08:40 写入 red_engine_allow / blue_engine_allow；
+    #     ai_brain.py 08:30 全量重写同一个文件时会保留这两个字段）
+    #
+    #   为什么不能只靠上面的「第一个存在的文件优先」：
+    #   那个列表是 config.yaml → config.yml → config.json → daily_config.json，
+    #   **谁先存在就用谁**。一旦目录里多了一个 config.yaml，
+    #   daily_config.json 就再也不会被读 → 熔断开关静默失效，
+    #   引擎拿着默认值 True 继续交易（风控是哑的，而且日志里看不出来）。
+    #   → 所以这里无条件把风控字段从 daily_config.json 盖上去。
+    _base = os.path.dirname(os.path.abspath(loaded_from)) if loaded_from else os.getcwd()
+    _daily_cfg = os.path.join(_base, "daily_config.json")
+    if os.path.basename(loaded_from or "") != "daily_config.json" and os.path.exists(_daily_cfg):
+        try:
+            with open(_daily_cfg, encoding="utf-8") as f:
+                _dc = json.load(f)
+            for _k in ("red_engine_allow", "blue_engine_allow", "global_market_status"):
+                if _k in _dc and hasattr(config, _k):
+                    setattr(config, _k, _dc[_k])
+        except Exception:
+            # 读不到就沿用默认（不因为风控配置坏了而让整个引擎起不来）
+            pass
 
     # 验证配置
     if errors := config.validate():

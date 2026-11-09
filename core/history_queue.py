@@ -114,17 +114,12 @@ def fetch_preheat_data_from_akshare(symbol: str,
                                      timeout: int = 10) -> Tuple[List[float], List[float], bool]:
     """
     从 AkShare 获取预热数据
-
-    Args:
-        symbol: 股票代码 (如 "sh600886")
-        minutes: 需要的分钟数
-        ema_alpha: EMA 平滑系数
-        timeout: 请求超时时间（秒）
-
-    Returns:
-        (price_queue, long_ema_queue, fallback_mode)
-        fallback_mode: True 表示需要降级到实时收集模式
     """
+    # 临时禁用代理，直连东财API
+    old_env = {}
+    for k in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
+        old_env[k] = os.environ.pop(k, None)
+    
     try:
         import akshare as ak
 
@@ -171,14 +166,20 @@ def fetch_preheat_data_from_akshare(symbol: str,
         logger.info(f"✅ AkShare 预热成功: {symbol}, 获取 {len(smoothed_prices)} 条数据")
 
         # price_queue 和 long_ema_queue 使用相同的数据
-        return smoothed_prices, smoothed_prices.copy(), False
-
+        result = smoothed_prices, smoothed_prices.copy(), False
     except ImportError:
         logger.warning("⚠️ AkShare 未安装，降级到实时收集模式")
-        return [], [], True
+        result = [], [], True
     except Exception as e:
         logger.error(f"⚠️ AkShare 数据获取失败: {symbol}, {e}，降级到实时收集模式")
-        return [], [], True
+        result = [], [], True
+    finally:
+        # 恢复代理环境变量
+        for k, v in old_env.items():
+            if v is not None:
+                os.environ[k] = v
+    
+    return result
 
 
 def get_preheat_mode(symbol: str,

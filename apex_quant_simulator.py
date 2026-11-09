@@ -175,13 +175,24 @@ def load_portfolio():
                         # 优先尝试加载本地历史
                         price_q, long_q, is_fresh = load_queue_history(sym, max_len=60)
 
-                        if not is_fresh or len(price_q) < 20:
-                            # 本地数据不新鲜或不足，从 AkShare 获取
-                            price_q, long_q, fallback = fetch_preheat_data_from_akshare(
+                        # 如果本地数据足够（不管是否新鲜），优先使用
+                        # 只有本地数据不足时才尝试 AkShare
+                        # AkShare 降级时保留本地数据继续使用
+                        if len(price_q) >= 20:
+                            log(f"✅ 加载本地队列: {sym} ({len(price_q)} 点)")
+                        elif not is_fresh:
+                            # 本地数据不新鲜，尝试 AkShare
+                            price_q_ak, long_q_ak, fallback = fetch_preheat_data_from_akshare(
                                 sym, minutes=60, ema_alpha=EMA_ALPHA
                             )
-                            if fallback:
-                                fallback_count += 1
+                            if not fallback and len(price_q_ak) >= 20:
+                                # AkShare 成功
+                                price_q = price_q_ak
+                                long_q = long_q_ak
+                                log(f"✅ AkShare预热: {sym} ({len(price_q)} 点)")
+                            else:
+                                # AkShare 降级，保留本地数据继续使用
+                                log(f"⚠️ AkShare降级，保留本地数据: {sym} ({len(price_q)} 点)")
 
                         if "price_queue" not in p: p["price_queue"] = {}
                         if "long_ema_queue" not in p: p["long_ema_queue"] = {}
@@ -277,14 +288,14 @@ def scan_market():
     if not data: return
 
     # ================= 预热锁检查 =================
-    # 计算所有股票的最小队列长度
-    min_queue_len = min(
-        (len(p.get("price_queue", {}).get(sym, [])) for sym in SYMBOLS.keys()),
-        default=0
-    )
+    # 计算所有股票的最小队列长度（排除0数据的标的，避免无效标的阻塞预热）
+    all_queue_lens = [len(p.get("price_queue", {}).get(sym, [])) for sym in SYMBOLS.keys()]
+    non_zero_lens = [l for l in all_queue_lens if l > 0]
+    min_queue_len = min(non_zero_lens) if non_zero_lens else 0
 
     if min_queue_len < WARMUP_POINTS:
         # 预热期：只填充数据，不执行任何交易判断
+        updated_count = 0
         for sym, info in data.items():
             price = info["current"]
             name = info["name"]
@@ -292,18 +303,55 @@ def scan_market():
 
             smoothed_price = calculate_ema(sym, price)
 
-            # 填充短期队列
+            # 填充短期队列 (预热期间允许超过MOMENTUM_WINDOW，因为需要积累WARMUP_POINTS个数据点)
             if sym not in p["price_queue"]: p["price_queue"][sym] = []
             p["price_queue"][sym].append(smoothed_price)
-            if len(p["price_queue"][sym]) > MOMENTUM_WINDOW: p["price_queue"][sym].pop(0)
+            # 预热期间允许队列达到WARMUP_POINTS，之后正常模式会按MOMENTUM_WINDOW限制
+            warmup_limit = max(MOMENTUM_WINDOW, WARMUP_POINTS)
+            if len(p["price_queue"][sym]) > warmup_limit: p["price_queue"][sym].pop(0)
 
             # 填充长期队列
             if sym not in p["long_ema_queue"]: p["long_ema_queue"][sym] = []
             p["long_ema_queue"][sym].append(smoothed_price)
             if len(p["long_ema_queue"][sym]) > EMA_PERIOD: p["long_ema_queue"][sym].pop(0)
 
-        log(f"⏳ Red Engine 预热中... 已收集 {min_queue_len}/{WARMUP_POINTS} 个数据点")
+            updated_count += 1
+
+        # 检查是否有 symbol 没有在 data 中返回 (比如停牌或 API 问题)
+        missing_syms = [s for s in SYMBOLS.keys() if s not in data]
+        if missing_syms:
+            log(f"WARNING: {len(missing_syms)} 个标的未返回数据: {missing_syms}")
+            # 尝试用历史数据补充缺失的标的
+            for sym in missing_syms:
+                price_q, long_q, is_fresh = load_queue_history(sym, max_len=60)
+                if len(price_q) > 0:
+                    p["price_queue"][sym] = price_q
+                    p["long_ema_queue"][sym] = long_q
+                    log(f"  补充 {sym} 历史数据 {len(price_q)} 点")
+                else:
+                    # 历史也是空的，尝试 AkShare 获取
+                    price_q_ak, long_q_ak, fallback = fetch_preheat_data_from_akshare(sym, minutes=60, ema_alpha=EMA_ALPHA)
+                    if len(price_q_ak) > 0:
+                        p["price_queue"][sym] = price_q_ak
+                        p["long_ema_queue"][sym] = long_q_ak
+                        log(f"  AkShare 补充 {sym} 数据 {len(price_q_ak)} 点")
+                    else:
+                        log(f"  严重: {sym} 无法获取任何数据，将被排除出预热计算")
+
+        # 修复: 在数据更新后计算实际最小队列长度
+        # 只考虑有数据的标的，避免 0 数据的标的阻塞预热
+        queue_lens = [len(p.get("price_queue", {}).get(sym, [])) for sym in SYMBOLS.keys()]
+        non_zero_queues = [l for l in queue_lens if l > 0]
+        actual_min_queue = min(non_zero_queues) if non_zero_queues else 0
+        total_with_data = len(non_zero_queues)
+
+        log(f"预热中... 已收集 {actual_min_queue}/{WARMUP_POINTS} 个数据点 (本轮更新了 {updated_count}/{total_with_data} 个有效标的)")
         save_portfolio(p)
+
+        # 如果没有任何标的更新,说明 API 可能有问题
+        if updated_count == 0 and len(data) == 0:
+            log("ERROR: get_market_data() 返回空数据,API 可能不可用")
+
         return  # 预热期直接返回，不执行后续交易逻辑
 
     if warmup_complete == False:
@@ -413,18 +461,19 @@ def scan_market():
             price_vs_ema = (smoothed_price - long_term_ema) / long_term_ema
             rsi = functions.calculate_rsi(queue) if len(queue) >= 14 else None
 
-            confirmed, confirmations = functions.confirm_buy_signal(
+            confirmed, detail = functions.confirm_buy_signal_weighted(
                 z_score=current_z,
                 volume_ratio=1.0,  # 暂无成交量数据，使用默认值
                 price_vs_ema=price_vs_ema,
                 rsi=rsi,
-                min_confirmations=MIN_CONFIRMATIONS
             )
 
             if not confirmed:
-                # 记录未确认的信号
-                log(f"⚠️ 信号未确认: {confirmations}")
+                # 记录未确认的信号（加权版详情更丰富）
+                log(f"⚠️ 信号未确认: 综合分={detail['score']}, 各因子={detail['factors']}, 强度={detail['strength']}")
                 continue
+
+            log(f"✅ 信号确认: 综合分={detail['score']}, 各因子={detail['factors']}, 强度={detail['strength']}")
 
             trade_amount = functions.calculate_trade_amount(p["cash"], TRADE_RATIO, min_trade_amount=10000.0)
             actual_buy_price = smoothed_price * (1 + SLIPPAGE)
@@ -450,7 +499,7 @@ def scan_market():
                 log(f"🟢 恐慌抄底触发! 买入 {name} {shares}股 @ {actual_buy_price:.3f}元")
 
                 # 构建确认因子描述
-                confirm_desc = [k for k, v in confirmations.items() if v]
+                confirm_desc = [k for k, v in detail['factors'].items() if v]
                 alerts.append(f"🟢 **恐慌抄底触发** (Z={current_z:.2f} < {effective_threshold:.2f})\n"
                               f"买入：{name} @ `{actual_buy_price:.3f}` | `{shares}股`\n"
                               f"确认因子: {', '.join(confirm_desc)}\n"
